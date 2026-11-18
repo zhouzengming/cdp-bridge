@@ -1,0 +1,22 @@
+{
+  "name": "cdp-bridge",
+  "version": "1.3.2",
+  "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, and visual ghost cursor for AI coding agents",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "bin": {
+    "cdp": "./cdp.mjs",
+    "cdp-bridge": "./cdp-bridge.mjs"
+  },
+  "scripts": {
+    "start": "node ./cdp-bridge.mjs start",
+    "restart": "node ./cdp-bridge.mjs restart",
+    "status": "node ./cdp-bridge.mjs status",
+    "stop": "node ./cdp-bridge.mjs stop",
+    "pages": "node ./cdp.mjs pages",
+    "diag": "node ./cdp.mjs diag summary"
+  }
+}
