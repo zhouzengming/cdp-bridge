@@ -54,6 +54,10 @@ const CANONICAL_COMMAND_MAP = {
   "page-hover": "page-hover",
   hover: "page-hover",
   move: "page-hover",
+  "page-scroll": "page-scroll",
+  scroll: "page-scroll",
+  wheel: "page-scroll",
+  "page-wheel": "page-scroll",
   "page-reload": "page-reload",
   reload: "page-reload",
   "page-wait": "page-wait",
@@ -202,6 +206,7 @@ function buildResultPreviewAndMeta(canonicalCommand, data, telemetry = {}) {
     if (data.tag) meta.tag = data.tag;
     if (data.role) meta.role = data.role;
     if (data.mode) meta.mode = data.mode;
+    if (data.direction) meta.direction = data.direction;
     if (typeof data.count === "number") meta.count = data.count;
     if (typeof data.totalMatched === "number") meta.totalMatched = data.totalMatched;
     if (typeof data.completedSteps === "number") meta.completedSteps = data.completedSteps;

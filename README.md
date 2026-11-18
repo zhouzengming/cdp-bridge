@@ -197,7 +197,7 @@ cdp shot 426B5451 ./dialog.png --selector "[role='dialog']" --keep-cursor
 cdp screenshot 426B5451 ./full.webp --full-page --format webp --quality 85
 ```
 
-### 4. 表单/富文本输入、点击、悬停与批量流水线（`fill` / `click` / `hover` / `batch`）
+### 4. 表单/富文本输入、点击、悬停、滚轮滚动与批量流水线（`fill` / `click` / `hover` / `scroll` / `batch`）
 
 ```bash
 # 填写受控输入框、<select> 或 TipTap/ProseMirror 富文本编辑器（别名：fill / type / page-type）
@@ -214,11 +214,19 @@ cdp click 426B5451 ".tabs-tab" --index 1 --wait 500
 cdp hover 426B5451 'button[aria-label="提交"]'
 cdp hover 426B5451 320,180
 
+# 模拟真实鼠标滚轮滚动并在指针右下角标注滚动方向与像素距离（别名：scroll / wheel / page-scroll）
+cdp scroll 426B5451 down 480
+cdp scroll 426B5451 up 360 --cursor demo
+cdp scroll 426B5451 "[role='dialog']" down 500
+cdp scroll 426B5451 ".footer-cta" into-view
+cdp scroll 426B5451 top
+
 # 在单次进程与单条连接内按序执行多步操作（支持 JSON 数组或 NDJSON）
 cdp batch 426B5451 --stdin <<'EOF'
 [
   { "cmd": "fill", "selector": ".ProseMirror", "text": "测试批量交互" },
   { "cmd": "click", "selector": "button[aria-label='发送']" },
+  { "cmd": "scroll", "direction": "down", "amount": 480 },
   { "cmd": "wait", "text": "已完成", "timeout": 20000 },
   { "cmd": "text", "selector": "main", "maxLength": 2000 }
 ]

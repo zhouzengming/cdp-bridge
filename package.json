@@ -1,6 +1,6 @@
 {
   "name": "cdp-bridge",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, and visual ghost cursor for AI coding agents",
   "license": "MIT",
   "type": "module",

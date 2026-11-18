@@ -66,6 +66,11 @@ cdp screenshot 426B5451 ./modal.png --selector "[role='dialog']" --with-cursor
 
 # 6) 悬停模拟指针供用户确认（鼠标滑过不误触发，仅当用户在页面点击鼠标接管时模拟指针自动平滑淡出）
 cdp hover 426B5451 320,180
+
+# 7) 模拟鼠标滚轮滚动并在指针右下角显示滚动方向与像素距离（支持整页、局部滚动容器、top/bottom 与 into-view）
+cdp scroll 426B5451 down 480
+cdp scroll 426B5451 "[role='dialog']" down 500
+cdp scroll 426B5451 ".target-card" into-view
 ```
 
 ### 3. 单连接批量流水线（`batch`）

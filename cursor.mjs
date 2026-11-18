@@ -39,7 +39,7 @@ export function resolveCursorMode(flags = {}) {
 
 export const CURSOR_HELPER_SOURCE = `(() => {
   const SYM = Symbol.for("cdp.bridge.cursor");
-  if (window[SYM] && window[SYM].version === 3) return window[SYM];
+  if (window[SYM] && window[SYM].version === 4) return window[SYM];
   if (window[SYM] && typeof window[SYM].destroy === "function") {
     try { window[SYM].destroy(); } catch {}
   }
@@ -313,6 +313,123 @@ export const CURSOR_HELPER_SOURCE = `(() => {
     }
   }
 
+  function resolveScrollArrow(dx, dy) {
+    const ax = Math.abs(dx || 0);
+    const ay = Math.abs(dy || 0);
+    if (ax < 1 && ay < 1) return "↕";
+    if (ax > 0 && ay > 0) {
+      if (ax >= ay * 2.5) return dx > 0 ? "→" : "←";
+      if (ay >= ax * 2.5) return dy > 0 ? "↓" : "↑";
+      if (dx > 0 && dy > 0) return "↘";
+      if (dx > 0 && dy < 0) return "↗";
+      if (dx < 0 && dy > 0) return "↙";
+      return "↖";
+    }
+    if (ay >= ax) return dy > 0 ? "↓" : "↑";
+    return dx > 0 ? "→" : "←";
+  }
+
+  function formatScrollLabel(dx, dy, customLabel) {
+    if (customLabel) return customLabel;
+    const arrow = resolveScrollArrow(dx, dy);
+    const ax = Math.round(Math.abs(dx || 0));
+    const ay = Math.round(Math.abs(dy || 0));
+    if (ax > 0 && ay > 0) {
+      return "Scroll " + arrow + " " + ax + "," + ay + "px";
+    }
+    const dist = ay || ax;
+    return dist > 0 ? "Scroll " + arrow + " " + dist + "px" : "Scroll " + arrow;
+  }
+
+  function createScrollChevronSvg(dx, dy, strokeColor) {
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", "22");
+    svg.setAttribute("height", "22");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    const hasVec = Math.abs(dx || 0) >= 1 || Math.abs(dy || 0) >= 1;
+    const angleDeg = hasVec ? Math.round((Math.atan2(dy || 0, dx || 0) * 180) / Math.PI - 90) : 0;
+    svg.style.cssText = "display:block;overflow:visible;transform:rotate(" + angleDeg + "deg);";
+
+    for (const d of ["M7.5 7.5L12 12L16.5 7.5", "M7.5 13L12 17.5L16.5 13"]) {
+      const outline = document.createElementNS(svgNS, "path");
+      outline.setAttribute("d", d);
+      outline.setAttribute("fill", "none");
+      outline.setAttribute("stroke", "#ffffff");
+      outline.setAttribute("stroke-width", "3.8");
+      outline.setAttribute("stroke-linecap", "round");
+      outline.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(outline);
+
+      const p = document.createElementNS(svgNS, "path");
+      p.setAttribute("d", d);
+      p.setAttribute("fill", "none");
+      p.setAttribute("stroke", strokeColor || "#7c3aed");
+      p.setAttribute("stroke-width", "2.2");
+      p.setAttribute("stroke-linecap", "round");
+      p.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(p);
+    }
+    return svg;
+  }
+
+  function spawnScrollEffect(x, y, dx, dy, color) {
+    if (!layerEl) return;
+    const ring = document.createElement("div");
+    ring.style.cssText = [
+      "position:fixed",
+      "left:" + x + "px",
+      "top:" + y + "px",
+      "width:38px",
+      "height:38px",
+      "margin-left:-19px",
+      "margin-top:-19px",
+      "border-radius:50%",
+      "border:2.2px dashed " + (color || "#8b5cf6"),
+      "background:rgba(139,92,246,0.16)",
+      "display:flex",
+      "align-items:center",
+      "justify-content:center",
+      "pointer-events:none",
+      "will-change:transform,opacity"
+    ].join(";");
+    const chevronWrap = document.createElement("div");
+    chevronWrap.style.cssText = "display:flex;align-items:center;justify-content:center;will-change:transform;";
+    chevronWrap.appendChild(createScrollChevronSvg(dx, dy, "#7c3aed"));
+    ring.appendChild(chevronWrap);
+    layerEl.insertBefore(ring, cursorEl);
+
+    const mag = Math.hypot(dx || 0, dy || 0);
+    const ux = mag >= 1 ? (dx || 0) / mag : 0;
+    const uy = mag >= 1 ? (dy || 0) / mag : 1;
+    const shiftFromX = Math.round(-ux * 5);
+    const shiftFromY = Math.round(-uy * 5);
+    const shiftToX = Math.round(ux * 6);
+    const shiftToY = Math.round(uy * 6);
+
+    try {
+      chevronWrap.animate(
+        [
+          { transform: "translate3d(" + shiftFromX + "px," + shiftFromY + "px,0)", opacity: 0.7 },
+          { transform: "translate3d(" + shiftToX + "px," + shiftToY + "px,0)", opacity: 1, offset: 0.65 },
+          { transform: "translate3d(" + shiftToX + "px," + shiftToY + "px,0)", opacity: 0 }
+        ],
+        { duration: 560, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "forwards" }
+      );
+      const anim = ring.animate(
+        [
+          { transform: "scale(0.78)", opacity: 0.96 },
+          { transform: "scale(1.08)", opacity: 0.9, offset: 0.6 },
+          { transform: "scale(1.22)", opacity: 0 }
+        ],
+        { duration: 580, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "forwards" }
+      );
+      anim.onfinish = () => ring.remove();
+    } catch {
+      setTimeout(() => ring.remove(), 580);
+    }
+  }
+
   function createStaticBox(rect, color) {
     const pad = 3;
     const box = document.createElement("div");
@@ -393,7 +510,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   }
 
   const api = {
-    version: 3,
+    version: 4,
     destroy() {
       unbindUserTakeoverListeners();
       if (idleTimer) clearTimeout(idleTimer);
@@ -413,7 +530,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         label: "Click",
         color: "rgba(37,99,235,0.92)",
         boxColor: "rgba(37,99,235,0.8)",
-        rect: cleanRect
+        rect: cleanRect,
+        persist
       };
       moveCursor(x, y, "Click", "rgba(37,99,235,0.92)", flightMs, persist);
       if (!suspended) {
@@ -435,7 +553,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         label,
         color: "rgba(16,185,129,0.92)",
         boxColor: "rgba(16,185,129,0.85)",
-        rect: cleanRect
+        rect: cleanRect,
+        persist
       };
       moveCursor(x, y, label, "rgba(16,185,129,0.92)", flightMs, persist);
       if (!suspended) {
@@ -452,12 +571,38 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         label: "Hover",
         color: "rgba(245,158,11,0.94)",
         boxColor: "rgba(245,158,11,0.85)",
-        rect: cleanRect
+        rect: cleanRect,
+        persist
       };
       moveCursor(x, y, "Hover", "rgba(245,158,11,0.94)", flightMs, persist);
       if (!suspended && cleanRect) {
         spawnHighlightBox(cleanRect, "rgba(245,158,11,0.85)", 600);
       }
+    },
+    showScroll(x, y, dx = 0, dy = 0, rect = null, customLabel = "", flightMs = 150, guardMs = 260, persist = false) {
+      extendSimGuard(guardMs);
+      const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+      const label = formatScrollLabel(dx, dy, customLabel);
+      lastActionState = {
+        kind: "scroll",
+        x,
+        y,
+        dx,
+        dy,
+        label,
+        color: "rgba(124,58,237,0.94)",
+        boxColor: "rgba(139,92,246,0.82)",
+        rect: cleanRect,
+        persist
+      };
+      moveCursor(x, y, label, "rgba(124,58,237,0.94)", flightMs, persist);
+      if (!suspended) {
+        spawnScrollEffect(x, y, dx, dy, "#8b5cf6");
+        if (cleanRect) {
+          spawnHighlightBox(cleanRect, "rgba(139,92,246,0.82)", 620);
+        }
+      }
+      return label;
     },
     prepareScreenshot(withCursor) {
       if (!withCursor) {
@@ -501,25 +646,38 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         pinnedHighlightEl.style.opacity = "0.9";
         layerEl.insertBefore(pinnedHighlightEl, cursorEl);
       }
-      if (kind === "click" || kind === "hover") {
-        // Static crisp ring around pointer locus so static PNG clearly shows click/hover point
-        const ringColor = kind === "hover" ? "#f59e0b" : "#3b82f6";
-        const ringBg = kind === "hover" ? "rgba(245,158,11,0.16)" : "rgba(59,130,246,0.18)";
+      if (kind === "click" || kind === "hover" || kind === "scroll") {
+        // Static crisp ring around pointer locus so static PNG clearly shows click/hover/scroll point
+        const isScroll = kind === "scroll";
+        const ringSize = isScroll ? 34 : 28;
+        const half = ringSize / 2;
+        const ringColor = isScroll ? "#8b5cf6" : kind === "hover" ? "#f59e0b" : "#3b82f6";
+        const ringBg = isScroll
+          ? "rgba(139,92,246,0.2)"
+          : kind === "hover"
+            ? "rgba(245,158,11,0.16)"
+            : "rgba(59,130,246,0.18)";
         const dot = document.createElement("div");
         dot.setAttribute("data-pinned-ring", "");
         dot.style.cssText = [
           "position:fixed",
           "left:" + x + "px",
           "top:" + y + "px",
-          "width:28px",
-          "height:28px",
-          "margin-left:-14px",
-          "margin-top:-14px",
+          "width:" + ringSize + "px",
+          "height:" + ringSize + "px",
+          "margin-left:-" + half + "px",
+          "margin-top:-" + half + "px",
           "border-radius:50%",
-          "border:2.5px solid " + ringColor,
+          "border:2.5px " + (isScroll ? "dashed " : "solid ") + ringColor,
           "background:" + ringBg,
+          "display:flex",
+          "align-items:center",
+          "justify-content:center",
           "pointer-events:none"
         ].join(";");
+        if (isScroll) {
+          dot.appendChild(createScrollChevronSvg(lastActionState.dx || 0, lastActionState.dy || 0, "#6d28d9"));
+        }
         if (pinnedHighlightEl) {
           const wrap = document.createElement("div");
           wrap.appendChild(pinnedHighlightEl);
@@ -532,7 +690,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         }
       }
       visible = true;
-      return { mode: "restored", x, y, label };
+      return { mode: "restored", x, y, label, kind };
     },
     finishScreenshot(withCursor) {
       if (!withCursor) {
@@ -544,7 +702,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         pinnedHighlightEl = null;
       }
       if (visible) {
-        scheduleIdleFade(false);
+        scheduleIdleFade(Boolean(lastActionState && lastActionState.persist));
       }
     },
     setSuspended(flag) {

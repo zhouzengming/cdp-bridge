@@ -1552,6 +1552,694 @@ async function hoverInPage(page, targetSpec, options = {}) {
   return { page, ...val };
 }
 
+const SCROLL_DIRECTIONS = new Set([
+  "down",
+  "up",
+  "left",
+  "right",
+  "top",
+  "bottom",
+  "into-view",
+  "intoview",
+]);
+
+function classifyScrollDirection(dx, dy) {
+  const ax = Math.abs(dx || 0);
+  const ay = Math.abs(dy || 0);
+  if (ax < 1 && ay < 1) return "none";
+  if (ax > 0 && ay > 0) {
+    if (ax >= ay * 2.5) return dx > 0 ? "right" : "left";
+    if (ay >= ax * 2.5) return dy > 0 ? "down" : "up";
+    if (dx > 0 && dy > 0) return "down-right";
+    if (dx > 0 && dy < 0) return "up-right";
+    if (dx < 0 && dy > 0) return "down-left";
+    return "up-left";
+  }
+  if (ay >= ax) return dy > 0 ? "down" : "up";
+  return dx > 0 ? "right" : "left";
+}
+
+function parseScrollCliArgs(restPositional, flags) {
+  let targetSpec =
+    typeof flags.selector === "string"
+      ? flags.selector
+      : typeof flags.at === "string"
+        ? flags.at
+        : null;
+  let direction =
+    typeof flags.direction === "string"
+      ? flags.direction.toLowerCase()
+      : typeof flags.to === "string"
+        ? flags.to.toLowerCase()
+        : null;
+  let amount =
+    flags.amount !== undefined && flags.amount !== true
+      ? Number(flags.amount)
+      : flags.distance !== undefined && flags.distance !== true
+        ? Number(flags.distance)
+        : undefined;
+  let dx =
+    flags.dx !== undefined && flags.dx !== true
+      ? Number(flags.dx)
+      : flags["delta-x"] !== undefined && flags["delta-x"] !== true
+        ? Number(flags["delta-x"])
+        : undefined;
+  let dy =
+    flags.dy !== undefined && flags.dy !== true
+      ? Number(flags.dy)
+      : flags["delta-y"] !== undefined && flags["delta-y"] !== true
+        ? Number(flags["delta-y"])
+        : undefined;
+
+  const isNumericToken = (tok) =>
+    tok !== undefined && /^-?\d+(?:\.\d+)?$/.test(String(tok).trim());
+
+  const [p0, p1, p2] = restPositional;
+  if (p0 !== undefined) {
+    const p0Lower = String(p0).trim().toLowerCase();
+    if (SCROLL_DIRECTIONS.has(p0Lower)) {
+      if (!direction) direction = p0Lower;
+      if (p1 !== undefined && isNumericToken(p1) && amount === undefined) {
+        amount = Number(p1);
+      }
+    } else if (isNumericToken(p0) && p1 === undefined) {
+      if (dy === undefined) dy = Number(p0);
+    } else {
+      if (!targetSpec) targetSpec = String(p0);
+      if (p1 !== undefined) {
+        const p1Lower = String(p1).trim().toLowerCase();
+        if (SCROLL_DIRECTIONS.has(p1Lower)) {
+          if (!direction) direction = p1Lower;
+          if (p2 !== undefined && isNumericToken(p2) && amount === undefined) {
+            amount = Number(p2);
+          }
+        } else if (isNumericToken(p1) && dy === undefined) {
+          dy = Number(p1);
+        }
+      }
+    }
+  }
+
+  if (direction === "intoview") {
+    direction = "into-view";
+  }
+
+  return {
+    targetSpec,
+    direction,
+    amount,
+    dx,
+    dy,
+    byText: Boolean(flags.text),
+    exact: Boolean(flags.exact),
+    index: flags.index !== undefined ? Number(flags.index) : 0,
+    steps:
+      flags.steps !== undefined && flags.steps !== true
+        ? Number(flags.steps)
+        : undefined,
+    waitMs:
+      flags.wait !== undefined && flags.wait !== true
+        ? Number(flags.wait)
+        : undefined,
+    nativeWheel: !flags["js-scroll"] && !flags["no-native"],
+  };
+}
+
+async function scrollInPage(page, options = {}) {
+  const {
+    targetSpec = null,
+    direction: rawDirection = null,
+    amount,
+    dx: explicitDx,
+    dy: explicitDy,
+    byText = false,
+    exact = false,
+    index = 0,
+    steps: rawSteps,
+    waitMs,
+    nativeWheel = true,
+    cursorMode = resolveCursorMode(),
+    timeoutMs = 15_000,
+  } = options;
+
+  const normDir = rawDirection ? String(rawDirection).toLowerCase() : null;
+  const isIntoView = normDir === "into-view" || normDir === "intoview";
+  const isBoundary = normDir === "top" || normDir === "bottom";
+
+  const coordMatch = targetSpec
+    ? /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(
+        String(targetSpec),
+      )
+    : null;
+  const coords = coordMatch
+    ? {
+        x: Math.round(Number(coordMatch[1])),
+        y: Math.round(Number(coordMatch[2])),
+      }
+    : null;
+
+  const isTextPrefix = String(targetSpec || "").startsWith("text=");
+  const forceText = byText || isTextPrefix;
+  const query = isTextPrefix
+    ? String(targetSpec).slice(5)
+    : String(targetSpec || "");
+
+  if (isIntoView && (!targetSpec || coords)) {
+    throw new Error(
+      'Scroll "into-view" requires an element selector or text=... target',
+    );
+  }
+
+  let deltaX = 0;
+  let deltaY = 0;
+  if (!isIntoView && !isBoundary) {
+    const hasExplicit =
+      Number.isFinite(explicitDx) || Number.isFinite(explicitDy);
+    if (hasExplicit) {
+      deltaX = Number.isFinite(explicitDx) ? Math.round(explicitDx) : 0;
+      deltaY = Number.isFinite(explicitDy) ? Math.round(explicitDy) : 0;
+    } else {
+      const dist =
+        Number.isFinite(amount) && amount >= 0 ? Math.round(amount) : 480;
+      if (normDir === "up") {
+        deltaY = -dist;
+      } else if (normDir === "left") {
+        deltaX = -dist;
+      } else if (normDir === "right") {
+        deltaX = dist;
+      } else {
+        deltaY = dist;
+      }
+    }
+  }
+
+  const defaultSteps = cursorMode === "demo" ? 4 : 1;
+  const steps = Math.max(
+    1,
+    Math.min(30, Number.isFinite(rawSteps) ? Math.round(rawSteps) : defaultSteps),
+  );
+  const persistCursor = cursorMode === "persist";
+
+  // Mode A: Scroll element into view or jump to top/bottom boundary
+  if (isIntoView || isBoundary) {
+    const boundaryExpr = `(async () => {
+      function isRendered(node) {
+        const s = window.getComputedStyle(node);
+        if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
+        const r = node.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      }
+      function clampX(x) {
+        return Math.max(8, Math.min(Math.max(8, window.innerWidth - 8), Math.round(x)));
+      }
+      function clampY(y) {
+        return Math.max(8, Math.min(Math.max(8, window.innerHeight - 8), Math.round(y)));
+      }
+      function findScrollable(startNode) {
+        let cur = startNode;
+        while (cur && cur !== document.body && cur !== document.documentElement) {
+          if (cur instanceof Element) {
+            const st = window.getComputedStyle(cur);
+            const oy = st.overflowY;
+            const ox = st.overflowX;
+            const canY = (oy === "auto" || oy === "scroll" || oy === "overlay") && cur.scrollHeight > cur.clientHeight + 1;
+            const canX = (ox === "auto" || ox === "scroll" || ox === "overlay") && cur.scrollWidth > cur.clientWidth + 1;
+            if (canY || canX) return cur;
+          }
+          cur = cur.parentElement;
+        }
+        return document.scrollingElement || document.documentElement;
+      }
+
+      let el = null;
+      let matchedBy = ${JSON.stringify(targetSpec ? (coords ? "coords" : "selector") : "viewport")};
+      if (${JSON.stringify(Boolean(coords))}) {
+        el = document.elementFromPoint(${coords ? coords.x : 0}, ${coords ? coords.y : 0});
+      } else if (${JSON.stringify(Boolean(targetSpec))}) {
+        if (!${JSON.stringify(forceText)}) {
+          try {
+            const all = Array.from(document.querySelectorAll(${JSON.stringify(query)}));
+            const vis = all.filter(isRendered);
+            el = (vis.length > 0 ? vis : all)[${index}] || null;
+          } catch { el = null; }
+        }
+        if (!el) {
+          matchedBy = "text";
+          const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, h1, h2, h3, h4, [role='tab'], [role='menuitem'], label, li, section, article, div")).filter(isRendered);
+          const q = ${JSON.stringify(query)};
+          const qNorm = q.trim();
+          const exactList = nodes.filter((n) => ((n.innerText || "").trim() === qNorm || (n.getAttribute("aria-label") || "").trim() === qNorm));
+          const partList = ${JSON.stringify(exact)} ? [] : nodes.filter((n) => !exactList.includes(n) && ((n.innerText || "").includes(q) || (n.getAttribute("aria-label") || "").includes(q)));
+          partList.sort((a, b) => ((a.innerText || "").length - (b.innerText || "").length));
+          el = [...exactList, ...partList][${index}] || null;
+        }
+        if (!el) {
+          return { ok: false, error: "No element matches " + ${JSON.stringify(targetSpec)} };
+        }
+      }
+
+      if (${JSON.stringify(isIntoView)}) {
+        const beforeWinX = window.scrollX;
+        const beforeWinY = window.scrollY;
+        const beforeRect = el.getBoundingClientRect();
+        el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+        const afterRect = el.getBoundingClientRect();
+        const cx = clampX(afterRect.left + afterRect.width / 2);
+        const cy = clampY(afterRect.top + afterRect.height / 2);
+        const effDx = Math.round((window.scrollX - beforeWinX) || (beforeRect.left - afterRect.left));
+        const effDy = Math.round((window.scrollY - beforeWinY) || (beforeRect.top - afterRect.top));
+        const rectClean = { left: afterRect.left, top: afterRect.top, width: afterRect.width, height: afterRect.height };
+        let badge = "";
+        if (${JSON.stringify(cursorMode !== "off")}) {
+          const customLbl = Math.abs(effDx) < 2 && Math.abs(effDy) < 2 ? "Scroll · InView" : "";
+          try {
+            badge = (${CURSOR_HELPER_SOURCE}).showScroll(
+              cx,
+              cy,
+              effDx,
+              effDy,
+              rectClean,
+              customLbl,
+              ${cursorMode === "demo" ? 220 : 150},
+              240,
+              ${JSON.stringify(persistCursor)}
+            ) || customLbl;
+          } catch {}
+          if (${JSON.stringify(cursorMode === "demo")}) {
+            await new Promise((r) => setTimeout(r, 180));
+          }
+        }
+        const root = document.scrollingElement || document.documentElement;
+        const maxY = Math.max(0, root.scrollHeight - window.innerHeight);
+        return {
+          ok: true,
+          mode: "into-view",
+          matchedBy,
+          tag: el.tagName,
+          x: cx,
+          y: cy,
+          deltaX: effDx,
+          deltaY: effDy,
+          scrolledX: effDx,
+          scrolledY: effDy,
+          scrollX: Math.round(window.scrollX),
+          scrollY: Math.round(window.scrollY),
+          maxScrollY: Math.round(maxY),
+          atTop: window.scrollY <= 1,
+          atBottom: window.scrollY >= maxY - 1,
+          badge
+        };
+      }
+
+      // Boundary mode: top or bottom
+      const scroller = el ? findScrollable(el) : (document.scrollingElement || document.documentElement);
+      const isRoot = scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
+      const beforeX = isRoot ? window.scrollX : scroller.scrollLeft;
+      const beforeY = isRoot ? window.scrollY : scroller.scrollTop;
+      const maxY = isRoot
+        ? Math.max(0, scroller.scrollHeight - window.innerHeight)
+        : Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const targetTop = ${JSON.stringify(normDir === "top")} ? 0 : maxY;
+      if (isRoot) {
+        window.scrollTo({ top: targetTop, behavior: "instant" });
+      } else {
+        scroller.scrollTo({ top: targetTop, behavior: "instant" });
+      }
+      const afterX = isRoot ? window.scrollX : scroller.scrollLeft;
+      const afterY = isRoot ? window.scrollY : scroller.scrollTop;
+      const effDy = Math.round(afterY - beforeY);
+      let rectClean = null;
+      let cx = Math.round(window.innerWidth / 2);
+      let cy = Math.round(window.innerHeight / 2);
+      if (${JSON.stringify(Boolean(coords))}) {
+        cx = clampX(${coords ? coords.x : 0});
+        cy = clampY(${coords ? coords.y : 0});
+      } else if (el && !isRoot) {
+        const r = scroller.getBoundingClientRect();
+        rectClean = { left: r.left, top: r.top, width: r.width, height: r.height };
+        cx = clampX(r.left + r.width / 2);
+        cy = clampY(r.top + r.height / 2);
+      }
+      const customLbl = ${JSON.stringify(normDir === "top" ? "Scroll ↑ Top" : "Scroll ↓ Bottom")};
+      let badge = customLbl;
+      if (${JSON.stringify(cursorMode !== "off")}) {
+        try {
+          badge = (${CURSOR_HELPER_SOURCE}).showScroll(
+            cx,
+            cy,
+            0,
+            ${normDir === "top" ? -1 : 1} * Math.max(1, Math.abs(effDy)),
+            rectClean,
+            customLbl,
+            ${cursorMode === "demo" ? 220 : 150},
+            240,
+            ${JSON.stringify(persistCursor)}
+          ) || customLbl;
+        } catch {}
+        if (${JSON.stringify(cursorMode === "demo")}) {
+          await new Promise((r) => setTimeout(r, 180));
+        }
+      }
+      return {
+        ok: true,
+        mode: ${JSON.stringify(normDir)},
+        direction: ${JSON.stringify(normDir)},
+        matchedBy,
+        x: cx,
+        y: cy,
+        deltaX: 0,
+        deltaY: effDy,
+        scrolledX: Math.round(afterX - beforeX),
+        scrolledY: effDy,
+        scrollX: Math.round(afterX),
+        scrollY: Math.round(afterY),
+        maxScrollY: Math.round(maxY),
+        atTop: afterY <= 1,
+        atBottom: afterY >= maxY - 1,
+        badge
+      };
+    })()`;
+
+    const bRes = await evaluateInPage(page, boundaryExpr, { timeoutMs });
+    const bVal = bRes.evaluation?.value;
+    if (!bVal?.ok) {
+      throw new Error(bVal?.error || `Scroll failed for ${targetSpec || normDir}`);
+    }
+    if (!bVal.direction) {
+      bVal.direction = classifyScrollDirection(bVal.deltaX, bVal.deltaY);
+    }
+    const { x: _bx, y: _by, ...cleanBoundary } = bVal;
+    if (waitMs && waitMs > 0) {
+      await sleep(waitMs);
+    }
+    return { page, ...cleanBoundary };
+  }
+
+  // Mode B: Wheel delta simulation (`Input.dispatchMouseEvent` type: "mouseWheel")
+  const totalGuardMs =
+    (cursorMode === "demo" ? 240 : 160) + steps * 70 + (waitMs ?? 220);
+
+  const prepExpr = `(async () => {
+    function isRendered(node) {
+      const s = window.getComputedStyle(node);
+      if (s.display === "none" || s.visibility === "hidden" || Number(s.opacity) === 0) return false;
+      const r = node.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+    function clampX(x) {
+      return Math.max(8, Math.min(Math.max(8, window.innerWidth - 8), Math.round(x)));
+    }
+    function clampY(y) {
+      return Math.max(8, Math.min(Math.max(8, window.innerHeight - 8), Math.round(y)));
+    }
+    function findScrollable(startNode, wantX, wantY) {
+      let cur = startNode;
+      while (cur && cur !== document.body && cur !== document.documentElement) {
+        if (cur instanceof Element) {
+          const st = window.getComputedStyle(cur);
+          const oy = st.overflowY;
+          const ox = st.overflowX;
+          const canY = wantY !== 0 && (oy === "auto" || oy === "scroll" || oy === "overlay") && cur.scrollHeight > cur.clientHeight + 1;
+          const canX = wantX !== 0 && (ox === "auto" || ox === "scroll" || ox === "overlay") && cur.scrollWidth > cur.clientWidth + 1;
+          if (canY || canX) return cur;
+        }
+        cur = cur.parentElement;
+      }
+      return document.scrollingElement || document.documentElement;
+    }
+
+    let cx = Math.round(window.innerWidth / 2);
+    let cy = Math.round(window.innerHeight / 2);
+    let rectClean = null;
+    let el = null;
+    let matchedBy = "viewport";
+
+    if (${JSON.stringify(Boolean(coords))}) {
+      matchedBy = "coords";
+      cx = clampX(${coords ? coords.x : 0});
+      cy = clampY(${coords ? coords.y : 0});
+      el = document.elementFromPoint(cx, cy);
+    } else if (${JSON.stringify(Boolean(targetSpec))}) {
+      matchedBy = "selector";
+      if (!${JSON.stringify(forceText)}) {
+        try {
+          const all = Array.from(document.querySelectorAll(${JSON.stringify(query)}));
+          const vis = all.filter(isRendered);
+          el = (vis.length > 0 ? vis : all)[${index}] || null;
+        } catch { el = null; }
+      }
+      if (!el) {
+        matchedBy = "text";
+        const nodes = Array.from(document.querySelectorAll("button, [role='button'], a, [role='tab'], [role='menuitem'], [role='listbox'], ul, ol, section, main, aside, div")).filter(isRendered);
+        const q = ${JSON.stringify(query)};
+        const qNorm = q.trim();
+        const exactList = nodes.filter((n) => ((n.innerText || "").trim() === qNorm || (n.getAttribute("aria-label") || "").trim() === qNorm));
+        const partList = ${JSON.stringify(exact)} ? [] : nodes.filter((n) => !exactList.includes(n) && ((n.innerText || "").includes(q) || (n.getAttribute("aria-label") || "").includes(q)));
+        partList.sort((a, b) => ((a.innerText || "").length - (b.innerText || "").length));
+        el = [...exactList, ...partList][${index}] || null;
+      }
+      if (!el) {
+        return { ok: false, error: "No element matches " + ${JSON.stringify(targetSpec)} };
+      }
+      const r0 = el.getBoundingClientRect();
+      const visH0 = Math.min(window.innerHeight, r0.bottom) - Math.max(0, r0.top);
+      const visW0 = Math.min(window.innerWidth, r0.right) - Math.max(0, r0.left);
+      if (
+        visH0 < Math.min(80, r0.height * 0.5) ||
+        visW0 < Math.min(80, r0.width * 0.5)
+      ) {
+        el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+      }
+      const r = el.getBoundingClientRect();
+      const ixLeft = Math.max(0, r.left);
+      const ixRight = Math.min(window.innerWidth, r.right);
+      const ixTop = Math.max(0, r.top);
+      const ixBottom = Math.min(window.innerHeight, r.bottom);
+      cx = clampX(ixRight > ixLeft ? (ixLeft + ixRight) / 2 : r.left + r.width / 2);
+      cy = clampY(ixBottom > ixTop ? (ixTop + ixBottom) / 2 : r.top + r.height / 2);
+    } else {
+      el = document.elementFromPoint(cx, cy);
+    }
+
+    const scroller = findScrollable(el, ${deltaX}, ${deltaY});
+    const isRoot = scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body;
+    if (!isRoot && scroller instanceof Element) {
+      const sr = scroller.getBoundingClientRect();
+      const sLeft = Math.max(0, sr.left);
+      const sRight = Math.min(window.innerWidth, sr.right);
+      const sTop = Math.max(0, sr.top);
+      const sBottom = Math.min(window.innerHeight, sr.bottom);
+      if (sRight > sLeft && sBottom > sTop) {
+        rectClean = {
+          left: sLeft,
+          top: sTop,
+          width: sRight - sLeft,
+          height: sBottom - sTop
+        };
+      }
+    }
+    const beforeX = isRoot ? window.scrollX : scroller.scrollLeft;
+    const beforeY = isRoot ? window.scrollY : scroller.scrollTop;
+
+    const ctxSym = Symbol.for("cdp.bridge.scrollCtx");
+    if (window[ctxSym]?.cleanup) {
+      try { window[ctxSym].cleanup(); } catch {}
+    }
+    const ctx = {
+      scroller,
+      isRoot,
+      beforeX,
+      beforeY,
+      wheelDefaultPrevented: false,
+      cleanup: null
+    };
+    const onWheelProbe = (ev) => {
+      if (ev.defaultPrevented) ctx.wheelDefaultPrevented = true;
+    };
+    window.addEventListener("wheel", onWheelProbe, { passive: true });
+    ctx.cleanup = () => window.removeEventListener("wheel", onWheelProbe);
+    window[ctxSym] = ctx;
+
+    let badge = "";
+    if (${JSON.stringify(cursorMode !== "off")}) {
+      try {
+        badge = (${CURSOR_HELPER_SOURCE}).showScroll(
+          cx,
+          cy,
+          ${deltaX},
+          ${deltaY},
+          rectClean,
+          "",
+          ${cursorMode === "demo" ? 210 : 140},
+          ${totalGuardMs},
+          ${JSON.stringify(persistCursor)}
+        ) || "";
+      } catch {}
+      if (${JSON.stringify(cursorMode === "demo")}) {
+        await new Promise((r) => setTimeout(r, 180));
+      }
+    }
+
+    return {
+      ok: true,
+      matchedBy,
+      tag: el ? el.tagName : undefined,
+      x: cx,
+      y: cy,
+      badge
+    };
+  })()`;
+
+  const prepRes = await evaluateInPage(page, prepExpr, { timeoutMs });
+  const prep = prepRes.evaluation?.value;
+  if (!prep?.ok) {
+    throw new Error(prep?.error || "Failed to prepare scroll target");
+  }
+
+  if (nativeWheel && (deltaX !== 0 || deltaY !== 0)) {
+    await callPage(
+      page,
+      "Input.dispatchMouseEvent",
+      { type: "mouseMoved", x: prep.x, y: prep.y, button: "none" },
+      timeoutMs,
+    ).catch(() => {});
+
+    let sentX = 0;
+    let sentY = 0;
+    const stepDelayMs = cursorMode === "demo" ? 55 : 25;
+    for (let s = 0; s < steps; s += 1) {
+      const targetCumX = Math.round(((s + 1) * deltaX) / steps);
+      const targetCumY = Math.round(((s + 1) * deltaY) / steps);
+      const stepDx = targetCumX - sentX;
+      const stepDy = targetCumY - sentY;
+      sentX = targetCumX;
+      sentY = targetCumY;
+      if (stepDx === 0 && stepDy === 0) continue;
+
+      await callPage(
+        page,
+        "Input.dispatchMouseEvent",
+        {
+          type: "mouseWheel",
+          x: prep.x,
+          y: prep.y,
+          deltaX: stepDx,
+          deltaY: stepDy,
+        },
+        timeoutMs,
+      );
+      if (s + 1 < steps) {
+        await sleep(stepDelayMs);
+      }
+    }
+  }
+
+  const settleMs =
+    waitMs !== undefined
+      ? Math.max(0, waitMs)
+      : nativeWheel
+        ? 180
+        : 0;
+  if (settleMs > 0) {
+    await sleep(settleMs);
+  }
+
+  const finishExpr = `(() => {
+    const ctxSym = Symbol.for("cdp.bridge.scrollCtx");
+    const ctx = window[ctxSym];
+    if (ctx?.cleanup) {
+      try { ctx.cleanup(); } catch {}
+    }
+    delete window[ctxSym];
+
+    const root = document.scrollingElement || document.documentElement;
+    const scroller = ctx?.scroller || root;
+    const isRoot = ctx ? ctx.isRoot : true;
+    const beforeX = ctx ? ctx.beforeX : window.scrollX;
+    const beforeY = ctx ? ctx.beforeY : window.scrollY;
+
+    if (${JSON.stringify(!nativeWheel)}) {
+      const targetEl = document.elementFromPoint(${prep.x}, ${prep.y}) || scroller;
+      try {
+        targetEl.dispatchEvent(new WheelEvent("wheel", {
+          deltaX: ${deltaX},
+          deltaY: ${deltaY},
+          clientX: ${prep.x},
+          clientY: ${prep.y},
+          bubbles: true,
+          cancelable: true
+        }));
+      } catch {}
+      if (isRoot) {
+        window.scrollBy({ left: ${deltaX}, top: ${deltaY}, behavior: "instant" });
+      } else {
+        scroller.scrollBy({ left: ${deltaX}, top: ${deltaY}, behavior: "instant" });
+      }
+    }
+
+    let curX = isRoot ? window.scrollX : scroller.scrollLeft;
+    let curY = isRoot ? window.scrollY : scroller.scrollTop;
+    const maxX = isRoot
+      ? Math.max(0, scroller.scrollWidth - window.innerWidth)
+      : Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    const maxY = isRoot
+      ? Math.max(0, scroller.scrollHeight - window.innerHeight)
+      : Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+
+    const canScrollX = (${deltaX} > 0 && beforeX < maxX - 1) || (${deltaX} < 0 && beforeX > 1);
+    const canScrollY = (${deltaY} > 0 && beforeY < maxY - 1) || (${deltaY} < 0 && beforeY > 1);
+    let fallbackScrollBy = false;
+    if (
+      ${JSON.stringify(nativeWheel)} &&
+      Math.abs(curX - beforeX) < 1 &&
+      Math.abs(curY - beforeY) < 1 &&
+      (canScrollX || canScrollY) &&
+      !ctx?.wheelDefaultPrevented
+    ) {
+      if (isRoot) {
+        window.scrollBy({ left: ${deltaX}, top: ${deltaY}, behavior: "instant" });
+        curX = window.scrollX;
+        curY = window.scrollY;
+      } else {
+        scroller.scrollBy({ left: ${deltaX}, top: ${deltaY}, behavior: "instant" });
+        curX = scroller.scrollLeft;
+        curY = scroller.scrollTop;
+      }
+      fallbackScrollBy = true;
+    }
+
+    return {
+      scrolledX: Math.round(curX - beforeX),
+      scrolledY: Math.round(curY - beforeY),
+      scrollX: Math.round(curX),
+      scrollY: Math.round(curY),
+      maxScrollX: Math.round(maxX),
+      maxScrollY: Math.round(maxY),
+      atTop: curY <= 1,
+      atBottom: curY >= maxY - 1,
+      ...(fallbackScrollBy ? { fallbackScrollBy: true } : {})
+    };
+  })()`;
+
+  const finRes = await evaluateInPage(page, finishExpr, { timeoutMs });
+  const metrics = finRes.evaluation?.value || {};
+  const direction = classifyScrollDirection(deltaX, deltaY);
+
+  return {
+    page,
+    ok: true,
+    mode: nativeWheel ? "wheel" : "js-scroll",
+    direction,
+    matchedBy: prep.matchedBy,
+    ...(prep.tag ? { tag: prep.tag } : {}),
+    deltaX,
+    deltaY,
+    steps,
+    ...(prep.badge ? { badge: prep.badge } : {}),
+    ...metrics,
+  };
+}
+
 async function readPageText(page, selector, maxLen = 50_000, timeoutMs = 15_000) {
   const expr = `(() => {
     const root = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "document.body"};
@@ -2043,6 +2731,7 @@ Page Interaction (React / Vue / Radix UI / TipTap ProseMirror compatible):
   page-fill <target> <selector> [text]    Fill input/textarea/select/contenteditable (aliases: fill, type, page-type; --clear, --append, --submit)
   page-click <target> <selector-or-text>  Click by CSS selector or visible text (alias: click; --text, --exact, --index <n>, --wait-for <sel>, --native)
   page-hover <target> <selector-or-x,y>   Move & hover pointer on element or x,y coords until user takeover (aliases: hover, move)
+  page-scroll <target> [sel|x,y] [dir] [px] Simulate mouse wheel scroll & directional badge (aliases: scroll, wheel; down|up|left|right|top|bottom|into-view, --dx, --dy, --steps)
   batch [target] [steps-json]             Run multiple steps sequentially over one connection (--file <path> | --stdin)
 
 Diagnostics & Telemetry:
@@ -2159,6 +2848,36 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
           },
         );
         const { page: _p, ...rest } = hv;
+        stepRes = rest;
+      } else if (
+        cmd === "scroll" ||
+        cmd === "page-scroll" ||
+        cmd === "wheel" ||
+        cmd === "page-wheel"
+      ) {
+        const sc = await scrollInPage(currentPage, {
+          targetSpec:
+            step.selector ??
+            step.coords ??
+            (step.x !== undefined && step.y !== undefined
+              ? `${step.x},${step.y}`
+              : step.text ?? null),
+          direction: step.direction ?? step.to ?? null,
+          amount: step.amount ?? step.distance,
+          dx: step.dx ?? step.deltaX,
+          dy: step.dy ?? step.deltaY,
+          byText: Boolean(step.byText || (step.text && !step.selector)),
+          exact: Boolean(step.exact),
+          index: step.index ?? 0,
+          steps: step.steps,
+          waitMs: step.waitMs ?? step.wait,
+          nativeWheel: step.jsScroll ? false : step.native !== false,
+          cursorMode: step.cursor
+            ? resolveCursorMode({ cursor: step.cursor })
+            : defaultCursorMode,
+          timeoutMs: stepTimeout,
+        });
+        const { page: _p, ...rest } = sc;
         stepRes = rest;
       } else if (cmd === "fill" || cmd === "page-fill" || cmd === "type" || cmd === "page-type") {
         const fl = await fillInPage(currentPage, step.selector, step.text ?? step.value ?? "", {
@@ -2730,6 +3449,33 @@ async function main() {
       index: flags.index !== undefined ? Number(flags.index) : 0,
       persist: !flags["auto-hide"],
       nativeMouse: Boolean(flags.native),
+      cursorMode: resolveCursorMode(flags),
+      timeoutMs: resolveTimeoutMs(flags, 15_000),
+    });
+    return { outputMode: formatMode(flags), data };
+  }
+
+  if (
+    command === "page-scroll" ||
+    command === "scroll" ||
+    command === "wheel" ||
+    command === "page-wheel"
+  ) {
+    const { flags, positional } = parseFlags(
+      restArgs,
+      ["text", "exact", "js-scroll", "no-native"],
+      globalFlags,
+    );
+    const { targetQuery, restPositional } = takeTargetArg(positional, flags);
+    if (!targetQuery) {
+      throw new Error(
+        "Usage: cdp scroll <target> [selector-or-x,y] [down|up|left|right|top|bottom|into-view] [amount-px] [--dx <px>] [--dy <px>] [--steps <n>] [--wait <ms>]",
+      );
+    }
+    const parsedScroll = parseScrollCliArgs(restPositional, flags);
+    const page = await resolvePage(targetQuery);
+    const data = await scrollInPage(page, {
+      ...parsedScroll,
       cursorMode: resolveCursorMode(flags),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
     });
