@@ -113,6 +113,16 @@ cdp status      # 只读查看连接状态、PID、转发计数与活跃会话�
   agy plugin install https://github.com/zhouzengming/cdp-bridge/tree/main/plugins/antigravity-mcp
   ```
 
+- **OpenAI Codex 一键安装原生插件**（通过仓库内置市场索引 [`.agents/plugins/marketplace.json`](./.agents/plugins/marketplace.json)，内置技能、`PreToolUse` 守护 Hook 与可选 MCP）：
+  ```bash
+  # 1) 注册市场（GitHub 远端或本地仓库路径）
+  codex plugin marketplace add zhouzengming/cdp-bridge
+
+  # 2) 按平台二选一安装：
+  codex plugin add cdp-bridge@cdp-bridge        # Linux / WSL2 推荐（轻量 CLI 版，详见 plugins/codex/README.md）
+  codex plugin add cdp-bridge-mcp@cdp-bridge    # 原生 Windows 推荐（MCP + CLI 版，详见 plugins/codex-mcp/README.md）
+  ```
+
 - **可选 Stdio MCP Server (`cdp-mcp`)**（适用于原生 Windows、Claude Desktop、Cursor、Codex 等，底层仍连接 `cdp-bridge` 共享 Named Pipe / Unix Socket，详见 [`mcp/README.md`](./mcp/README.md)）：
   ```json
   {
@@ -322,7 +332,8 @@ cdp raw Target.activateTarget --params '{"targetId":"426B54510000000000000000000
   | `src/diag.mjs` | 工具调用遥测采集、敏感凭据脱敏轮转与 `cdp diag` 自分析模块 |
   | `mcp/server.mjs` + `mcp/tools.mjs` | 零依赖 Stdio MCP Server（`cdp-mcp`，共享底层 Named Pipe/Socket，免除 Windows 转义与乱码） |
   | `skills/cdp-bridge/` | 面向 AI Coding Agent 的标准技能包（含 `SKILL.md`） |
-  | `plugins/` | 面向主流 Agent App 的插件适配目录（已内置 `antigravity/` 轻量 CLI 版与 `antigravity-mcp/` 版） |
+  | `plugins/` | 面向主流 Agent App 的插件适配目录（已内置 `antigravity/`、`antigravity-mcp/`、`codex/`、`codex-mcp/`） |
+  | `.agents/plugins/marketplace.json` | 仓库根 Codex 插件市场目录索引（支持 `codex plugin marketplace add`） |
   | `package.json` | Node ESM 包定义与 `cdp` / `cdp-bridge` / `cdp-mcp` 全局命令入口 |
 
 - **本地运行时文件**（自动生成，已与代码仓库隔离）：

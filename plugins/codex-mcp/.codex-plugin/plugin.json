@@ -1,0 +1,39 @@
+{
+  "name": "cdp-bridge-mcp",
+  "version": "1.5.0",
+  "description": "MCP + CLI edition of cdp-bridge for OpenAI Codex: exposes 16 structured UTF-8 MCP browser tools over the shared cdp-bridge daemon (ideal for native Windows PowerShell/CMD and sandboxed sessions), plus workflow skill and PreToolUse guard hook.",
+  "author": {
+    "name": "zhouzengming",
+    "url": "https://github.com/zhouzengming"
+  },
+  "repository": "https://github.com/zhouzengming/cdp-bridge",
+  "license": "MIT",
+  "keywords": [
+    "cdp",
+    "mcp",
+    "chrome",
+    "edge",
+    "devtools",
+    "browser",
+    "windows",
+    "codex"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CDP Bridge (MCP)",
+    "shortDescription": "Structured MCP browser tools + persistent CDP bridge for Codex (ideal on Windows)",
+    "longDescription": "Exposes 16 zero-dependency Stdio MCP tools (cdp_pages, cdp_elements, cdp_click, cdp_fill, cdp_hover, cdp_scroll, cdp_wait, cdp_screenshot, cdp_logs, cdp_network, cdp_batch, cdp_eval, cdp_call, etc.) backed by the shared cdp-bridge daemon over Windows Named Pipe or Linux Unix Socket. Eliminates PowerShell quoting and CP936 encoding issues while keeping single-handshake browser auth across windows.",
+    "developerName": "zhouzengming",
+    "category": "Productivity",
+    "capabilities": [
+      "16 structured UTF-8 MCP tools with readOnlyHint annotations",
+      "Shared single-handshake connection over Windows Named Pipe or Linux Unix Socket",
+      "Zero PowerShell quoting or CP936/GBK encoding issues on native Windows",
+      "Top-Layer visual ghost cursor and click-only human takeover",
+      "PreToolUse Bash guard blocking raw 127.0.0.1:9222 bypasses"
+    ],
+    "websiteURL": "https://github.com/zhouzengming/cdp-bridge"
+  }
+}

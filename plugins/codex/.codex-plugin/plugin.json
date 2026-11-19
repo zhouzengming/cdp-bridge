@@ -1,0 +1,36 @@
+{
+  "name": "cdp-bridge",
+  "version": "1.5.0",
+  "description": "Lightweight CLI edition of cdp-bridge for OpenAI Codex: bundles the cdp-bridge browser debugging skill and a PreToolUse Bash guard hook that prevents bypassing the persistent CDP bridge daemon.",
+  "author": {
+    "name": "zhouzengming",
+    "url": "https://github.com/zhouzengming"
+  },
+  "repository": "https://github.com/zhouzengming/cdp-bridge",
+  "license": "MIT",
+  "keywords": [
+    "cdp",
+    "chrome",
+    "edge",
+    "devtools",
+    "browser",
+    "automation",
+    "codex"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CDP Bridge",
+    "shortDescription": "Persistent CDP browser bridge skill and direct-port guard for Codex",
+    "longDescription": "Connects OpenAI Codex to your logged-in Chrome or Edge browser via the persistent local cdp-bridge daemon (single WebSocket handshake, zero proxy interference, Top-Layer visual ghost cursor). Bundles the cdp-bridge workflow skill and a PreToolUse Bash guard hook blocking raw :9222 direct connections without spawning any extra MCP child process.",
+    "developerName": "zhouzengming",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive element snapshots (cdp elements) and Radix/ProseMirror compatible click/fill/scroll",
+      "Single-handshake persistent browser debugging over Unix Socket or Windows Named Pipe",
+      "Top-Layer visual ghost cursor with click-only human takeover",
+      "PreToolUse Bash guard blocking raw 127.0.0.1:9222 bypasses"
+    ],
+    "websiteURL": "https://github.com/zhouzengming/cdp-bridge"
+  }
+}

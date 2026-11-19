@@ -1,0 +1,33 @@
+{
+  "name": "cdp-bridge",
+  "description": "Persistent Chrome DevTools Protocol (CDP) bridge plugins for OpenAI Codex (lightweight CLI edition and MCP edition).",
+  "interface": {
+    "displayName": "CDP Bridge"
+  },
+  "plugins": [
+    {
+      "name": "cdp-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cdp-bridge-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "cdp-bridge": {
+      "command": "cdp-mcp",
+      "args": [],
+      "startup_timeout_sec": 30,
+      "env_vars": [
+        "CDP_HOST",
+        "CDP_PORT",
+        "CDP_WS_URL",
+        "CDP_PORT_FILE",
+        "CDP_BRIDGE_SOCKET",
+        "CDP_CONNECT_TIMEOUT",
+        "CDP_NO_AUTO_START",
+        "CDP_NO_WMI_BREAKAWAY",
+        "CDP_CURSOR",
+        "CDP_SCREENSHOT_CURSOR",
+        "CDP_DIAG",
+        "CDP_DIAG_LOG",
+        "CDP_CALLER",
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LOCALAPPDATA",
+        "USERPROFILE"
+      ]
+    }
+  }
+}

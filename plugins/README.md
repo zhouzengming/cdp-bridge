@@ -10,8 +10,9 @@
 | :--- | :--- | :--- | :--- |
 | [`antigravity/`](./antigravity/) | Google Antigravity（轻量 CLI 版） | **已可用** | **Linux / WSL2 首选**：零常驻 MCP 子进程，含 `plugin.json`、`hooks.json`（防直连 9222 守护）、`rules/AGENTS.md`、`skills/cdp-bridge/` |
 | [`antigravity-mcp/`](./antigravity-mcp/) | Google Antigravity（MCP + CLI 版） | **已可用** | **原生 Windows / 受限沙箱首选**：在 CLI 版基础上挂载 `cdp-mcp`（连接共享 Named Pipe/Socket，免除 PowerShell 转义与 GBK 乱码） |
+| [`codex/`](./codex/) | OpenAI Codex（轻量 CLI 版） | **已可用** | **Linux / WSL2 首选**：`.codex-plugin/plugin.json`、`hooks/hooks.json`（`Bash` 防直连守护）、`skills/cdp-bridge/`，已接入仓库根 [`.agents/plugins/marketplace.json`](../.agents/plugins/marketplace.json) |
+| [`codex-mcp/`](./codex-mcp/) | OpenAI Codex（MCP + CLI 版） | **已可用** | **原生 Windows / 沙箱首选**：在 CLI 版基础上增加 `.mcp.json`（完整透传 `CDP_*` 与系统路径环境变量 `env_vars`） |
 | [`claude-code/`](./claude-code/) | Anthropic Claude Code | 规划脚手架 | `.claude-plugin/plugin.json`、`.mcp.json`、`hooks/hooks.json`、`skills/` |
-| [`codex/`](./codex/) | OpenAI Codex | 规划脚手架 | `plugin.json`、`mcp.json`、`hooks/`、`skills/` |
 | [`cursor/`](./cursor/) | Cursor IDE | 规划脚手架 | `mcp.json`、Hooks 与 Rules 集成配置 |
 | [`opencode/`](./opencode/) | OpenCode | 规划脚手架 | OpenCode 插件入口、自定义工具与技能注册配置 |
 | [`agent-plugins/`](./agent-plugins/) | [Agent Plugins 1.0](https://agent-plugins.org/specification) 跨端通用包 | 规划脚手架 | 厂商中立 `plugin.json` + `mcp.json` + `skills/` |
