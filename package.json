@@ -20,6 +20,6 @@
     "pages": "node ./src/cdp.mjs pages",
     "diag": "node ./src/cdp.mjs diag summary",
     "mcp": "node ./mcp/server.mjs",
-    "test": "node --test ./plugins/antigravity/plugin.test.mjs ./plugins/codex/plugin.test.mjs ./mcp/mcp.test.mjs"
+    "test": "node --test ./plugins/antigravity/plugin.test.mjs ./plugins/codex/plugin.test.mjs ./plugins/claude-code/plugin.test.mjs ./mcp/mcp.test.mjs"
   }
 }

@@ -1,0 +1,23 @@
+{
+  "name": "cdp-bridge-mcp",
+  "version": "1.5.0",
+  "description": "MCP + CLI edition of cdp-bridge for Claude Code: exposes 16 structured UTF-8 MCP browser tools over the shared cdp-bridge daemon (ideal for native Windows PowerShell/CMD and sandboxed sessions), plus workflow skill and PreToolUse Bash guard.",
+  "author": {
+    "name": "zhouzengming",
+    "url": "https://github.com/zhouzengming"
+  },
+  "homepage": "https://github.com/zhouzengming/cdp-bridge",
+  "repository": "https://github.com/zhouzengming/cdp-bridge",
+  "license": "MIT",
+  "keywords": [
+    "cdp",
+    "mcp",
+    "chrome",
+    "edge",
+    "devtools",
+    "browser",
+    "windows",
+    "claude-code"
+  ],
+  "mcpServers": "./.mcp.json"
+}

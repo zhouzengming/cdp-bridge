@@ -1,0 +1,6 @@
+{
+  "cdp-bridge": {
+    "command": "cdp-mcp",
+    "args": []
+  }
+}
