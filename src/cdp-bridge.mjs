@@ -7,6 +7,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import util from "node:util";
+import { trySpawnWindowsWmiBreakaway } from "./win-spawn.mjs";
+
+process.stdout?.setDefaultEncoding?.("utf8");
+process.stderr?.setDefaultEncoding?.("utf8");
 
 const scriptPath = fileURLToPath(import.meta.url);
 const command = process.argv[2] || "status";
@@ -17,6 +22,7 @@ function parseConnectionArgs(args) {
   let port = process.env.CDP_PORT || "";
   let wsUrl = process.env.CDP_WS_URL || "";
   let portFile = process.env.CDP_PORT_FILE || "";
+  let logFile = "";
   let waitMs = process.env.CDP_CONNECT_TIMEOUT
     ? Number(process.env.CDP_CONNECT_TIMEOUT)
     : 15_000;
@@ -74,6 +80,10 @@ function parseConnectionArgs(args) {
       process.env.CDP_BRIDGE_SOCKET = args[++i];
     } else if (arg.startsWith("--socket=")) {
       process.env.CDP_BRIDGE_SOCKET = arg.slice("--socket=".length);
+    } else if (arg === "--log-file" && i + 1 < args.length) {
+      logFile = args[++i];
+    } else if (arg.startsWith("--log-file=")) {
+      logFile = arg.slice("--log-file=".length);
     } else if (!arg.startsWith("-")) {
       explicit = true;
       if (/^wss?:\/\//i.test(arg)) {
@@ -101,7 +111,7 @@ function parseConnectionArgs(args) {
     }
   }
 
-  return { host, port, wsUrl, portFile, waitMs, noWait, explicit };
+  return { host, port, wsUrl, portFile, logFile, waitMs, noWait, explicit };
 }
 
 const connArgs = parseConnectionArgs(rawCmdArgs);
@@ -608,15 +618,31 @@ async function startBridge({ forceRestart = false } = {}) {
   }
 
   fs.mkdirSync(stateDir, { recursive: true });
-  const logFd = fs.openSync(logPath, "a");
-  const child = spawn(process.execPath, [scriptPath, "serve"], {
-    detached: true,
-    env: childEnv,
-    stdio: ["ignore", logFd, logFd],
-    windowsHide: true,
-  });
-  child.unref();
-  fs.closeSync(logFd);
+
+  const serveArgs = [scriptPath, "serve"];
+  if (isWindows) {
+    serveArgs.push("--log-file", logPath, "--socket", socketPath);
+    if (resolvedWsUrl) serveArgs.push("--ws-url", resolvedWsUrl);
+    if (connArgs.host) serveArgs.push("--host", connArgs.host);
+    if (connArgs.port) serveArgs.push("--port", String(connArgs.port));
+    if (connArgs.portFile) serveArgs.push("--port-file", connArgs.portFile);
+  }
+
+  const wmiSpawned = isWindows
+    ? trySpawnWindowsWmiBreakaway(process.execPath, serveArgs, stateDir, childEnv)
+    : { ok: false };
+
+  if (!wmiSpawned.ok) {
+    const logFd = fs.openSync(logPath, "a");
+    const child = spawn(process.execPath, [scriptPath, "serve"], {
+      detached: true,
+      env: childEnv,
+      stdio: ["ignore", logFd, logFd],
+      windowsHide: true,
+    });
+    child.unref();
+    fs.closeSync(logFd);
+  }
 
   const socketDeadline = Date.now() + 5_000;
   let lastStatus = null;
@@ -694,6 +720,20 @@ function buildMatcher(pattern) {
 
 async function serveBridge() {
   fs.mkdirSync(stateDir, { recursive: true });
+
+  if (connArgs.logFile) {
+    const targetLogFile = path.resolve(connArgs.logFile);
+    fs.mkdirSync(path.dirname(targetLogFile), { recursive: true });
+    const appendLine = (...items) => {
+      try {
+        fs.appendFileSync(targetLogFile, `${util.format(...items)}\n`, "utf8");
+      } catch {
+        // Ignore transient log file write errors
+      }
+    };
+    console.log = appendLine;
+    console.error = appendLine;
+  }
 
   let pidFd;
   try {

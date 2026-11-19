@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 import { CURSOR_HELPER_SOURCE, resolveCursorMode } from "./cursor.mjs";
 import { recordCliInvocation, runDiagCommand } from "./diag.mjs";
 
+process.stdout?.setDefaultEncoding?.("utf8");
+process.stderr?.setDefaultEncoding?.("utf8");
+
 const cliStartTimeMs = Date.now();
 const bridgeScriptPath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),

@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const repoDir = path.dirname(fileURLToPath(import.meta.url));
+const srcDir = path.dirname(fileURLToPath(import.meta.url));
+const repoDir = path.resolve(srcDir, "..");
 export const DEFAULT_DIAG_LOG_PATH = path.join(repoDir, "logs", "diag.jsonl");
 
 const MAX_PREVIEW_CHARS = 100;
