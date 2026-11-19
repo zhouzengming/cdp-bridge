@@ -89,8 +89,9 @@ npm link
 
 # 方式 B：Linux / WSL2 下也可直接软链至 ~/.local/bin（请确保 ~/.local/bin 已加入 PATH）
 mkdir -p ~/.local/bin
-ln -sfn "$(pwd)/cdp.mjs" ~/.local/bin/cdp
-ln -sfn "$(pwd)/cdp-bridge.mjs" ~/.local/bin/cdp-bridge
+ln -sfn "$(pwd)/src/cdp.mjs" ~/.local/bin/cdp
+ln -sfn "$(pwd)/src/cdp-bridge.mjs" ~/.local/bin/cdp-bridge
+ln -sfn "$(pwd)/mcp/server.mjs" ~/.local/bin/cdp-mcp
 ```
 
 ### 3. 启动与验证
@@ -101,23 +102,42 @@ cdp pages       # 列出当前打开的所有页面标签（守护进程未运�
 cdp status      # 只读查看连接状态、PID、转发计数与活跃会话（不触发自启动；加 --ensure 可按需拉起）
 ```
 
-### 4. 挂载 AI Coding Agent Skill（推荐）
+### 4. 接入 AI Coding Agent 插件、Skill 与可选 MCP（推荐）
 
-仓库内置了面向 Coding Agent 调优的操作指南 [`skill/SKILL.md`](./skill/SKILL.md)，可引导 Agent 遵循“先 `elements` 探路、优先用 `click`/`fill`/`batch` 原语、锁定 8 位 `targetId` 前缀”最佳实践。按需软链到对应技能目录即可生效：
+- **Google Antigravity 一键安装原生插件**（内置 [`skills/cdp-bridge`](./skills/cdp-bridge/SKILL.md) 技能、精简规则与防绕过直连 `9222` 端口的 `PreToolUse` 守护 Hook）：
+  ```bash
+  # Linux / WSL2 推荐：轻量 CLI 版（零常驻 MCP 子进程，详见 plugins/antigravity/README.md）
+  agy plugin install https://github.com/zhouzengming/cdp-bridge/tree/main/plugins/antigravity
 
-```bash
-# 工作区或全局 .agents 技能目录（Antigravity / Codex 等通用）
-mkdir -p /path/to/your-workspace/.agents/skills
-ln -sfn "$(pwd)/skill" /path/to/your-workspace/.agents/skills/cdp-bridge
+  # 原生 Windows / 无 Shell 沙箱推荐：MCP + CLI 版（复用共享 Named Pipe，免 PowerShell 转义与乱码，详见 plugins/antigravity-mcp/README.md）
+  agy plugin install https://github.com/zhouzengming/cdp-bridge/tree/main/plugins/antigravity-mcp
+  ```
 
-# Claude Code 全局个人技能目录
-mkdir -p ~/.claude/skills
-ln -sfn "$(pwd)/skill" ~/.claude/skills/cdp-bridge
+- **可选 Stdio MCP Server (`cdp-mcp`)**（适用于原生 Windows、Claude Desktop、Cursor、Codex 等，底层仍连接 `cdp-bridge` 共享 Named Pipe / Unix Socket，详见 [`mcp/README.md`](./mcp/README.md)）：
+  ```json
+  {
+    "mcpServers": {
+      "cdp-bridge": {
+        "command": "cdp-mcp"
+      }
+    }
+  }
+  ```
 
-# Codex 全局个人技能目录
-mkdir -p ~/.codex/skills
-ln -sfn "$(pwd)/skill" ~/.codex/skills/cdp-bridge
-```
+- **通用 Agent Skill 软链挂载**（适用于 Claude Code / Codex / Antigravity 等标准技能目录）：
+  ```bash
+  # 工作区或全局 .agents 技能目录（Antigravity / Codex 等通用）
+  mkdir -p /path/to/your-workspace/.agents/skills
+  ln -sfn "$(pwd)/skills/cdp-bridge" /path/to/your-workspace/.agents/skills/cdp-bridge
+
+  # Claude Code 全局个人技能目录
+  mkdir -p ~/.claude/skills
+  ln -sfn "$(pwd)/skills/cdp-bridge" ~/.claude/skills/cdp-bridge
+
+  # Codex 全局个人技能目录
+  mkdir -p ~/.codex/skills
+  ln -sfn "$(pwd)/skills/cdp-bridge" ~/.codex/skills/cdp-bridge
+  ```
 
 ---
 
@@ -284,6 +304,7 @@ cdp raw Target.activateTarget --params '{"targetId":"426B54510000000000000000000
 | `CDP_BRIDGE_SOCKET` | 见下方运行时文件 | 自定义本地控制 Unix Socket 路径或 Windows Named Pipe 名称 |
 | `CDP_CONNECT_TIMEOUT` | `15000` | 启动/重连桥接时等待浏览器 WebSocket 进入 `ready` 的最大毫秒数 |
 | `CDP_NO_AUTO_START` | 未启用 (`0`) | 设为 `1` 时禁用客户端按需自动拉起守护进程 |
+| `CDP_NO_WMI_BREAKAWAY` | 未启用 (`0`) | 原生 Windows 下设为 `1` 时禁用 WMI 脱离 Job Object 拉起，回退普通 `detached` 启动 |
 | `CDP_CURSOR` | `fast` | 虚拟指针模式：`fast`（0 延迟，空闲 2.6s 淡出）、`persist`（常驻悬停）、`demo`（180ms 慢动作）、`off` / `0`（关闭） |
 | `CDP_SCREENSHOT_CURSOR` | 未启用 (`0`) | 设为 `1` 时截图默认保留并还原模拟指针、角标与焦点高亮框 |
 | `CDP_DIAG` | 启用 (`1`) | 设为 `0` / `off` 时全局关闭 `logs/diag.jsonl` 调用遥测记录 |
@@ -292,14 +313,17 @@ cdp raw Target.activateTarget --params '{"targetId":"426B54510000000000000000000
 ### 2. 仓库目录与运行时文件
 
 - **仓库文件结构**：
-  | 文件 / 路径 | 说明 |
+  | 文件 / 目录 | 说明 |
   | :--- | :--- |
-  | `cdp-bridge.mjs` | 常驻桥接守护进程（WebSocket 保活、端口发现、Session 与事件环形缓冲） |
-  | `cdp.mjs` | CLI 客户端（页面快照、高层交互原语、`batch` 流水线与按需自启动） |
-  | `cursor.mjs` | Top-Layer (`popover="manual"`) + 封闭 Shadow DOM 虚拟指针与点击接管模块 |
-  | `diag.mjs` | 工具调用遥测采集、敏感凭据脱敏轮转与 `cdp diag` 自分析模块 |
-  | `skill/SKILL.md` | 面向 AI Coding Agent 的浏览器调试与端到端验收 Skill |
-  | `package.json` | Node ESM 包定义与 `cdp` / `cdp-bridge` 全局命令入口 |
+  | `src/cdp-bridge.mjs` | 常驻桥接守护进程（WebSocket 保活、端口发现、Session 与事件环形缓冲） |
+  | `src/cdp.mjs` | CLI 客户端（页面快照、高层交互与滚轮原语、`batch` 流水线与按需自启动） |
+  | `src/win-spawn.mjs` | 原生 Windows WMI (`Win32_Process.Create`) 脱离 Job Object 无黑框后台启动模块 |
+  | `src/cursor.mjs` | Top-Layer (`popover="manual"`) + 封闭 Shadow DOM 虚拟指针与点击接管模块 |
+  | `src/diag.mjs` | 工具调用遥测采集、敏感凭据脱敏轮转与 `cdp diag` 自分析模块 |
+  | `mcp/server.mjs` + `mcp/tools.mjs` | 零依赖 Stdio MCP Server（`cdp-mcp`，共享底层 Named Pipe/Socket，免除 Windows 转义与乱码） |
+  | `skills/cdp-bridge/` | 面向 AI Coding Agent 的标准技能包（含 `SKILL.md`） |
+  | `plugins/` | 面向主流 Agent App 的插件适配目录（已内置 `antigravity/` 轻量 CLI 版与 `antigravity-mcp/` 版） |
+  | `package.json` | Node ESM 包定义与 `cdp` / `cdp-bridge` / `cdp-mcp` 全局命令入口 |
 
 - **本地运行时文件**（自动生成，已与代码仓库隔离）：
   - **Linux / WSL2**：默认位于 `/run/user/<uid>/cdp-bridge-<uid>/`（无 `XDG_RUNTIME_DIR` 时回退至 `$TMPDIR/cdp-bridge-<uid>/`），包含 `bridge.sock`（权限 `0600`）、`bridge.sock.pid`、`bridge.sock.log` 与 `client-sessions.json`。

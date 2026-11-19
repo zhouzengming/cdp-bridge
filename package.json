@@ -1,22 +1,25 @@
 {
   "name": "cdp-bridge",
-  "version": "1.4.0",
-  "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, and visual ghost cursor for AI coding agents",
+  "version": "1.5.0",
+  "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, Stdio MCP server, and visual ghost cursor for AI coding agents",
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
   "bin": {
-    "cdp": "./cdp.mjs",
-    "cdp-bridge": "./cdp-bridge.mjs"
+    "cdp": "./src/cdp.mjs",
+    "cdp-bridge": "./src/cdp-bridge.mjs",
+    "cdp-mcp": "./mcp/server.mjs"
   },
   "scripts": {
-    "start": "node ./cdp-bridge.mjs start",
-    "restart": "node ./cdp-bridge.mjs restart",
-    "status": "node ./cdp-bridge.mjs status",
-    "stop": "node ./cdp-bridge.mjs stop",
-    "pages": "node ./cdp.mjs pages",
-    "diag": "node ./cdp.mjs diag summary"
+    "start": "node ./src/cdp-bridge.mjs start",
+    "restart": "node ./src/cdp-bridge.mjs restart",
+    "status": "node ./src/cdp-bridge.mjs status",
+    "stop": "node ./src/cdp-bridge.mjs stop",
+    "pages": "node ./src/cdp.mjs pages",
+    "diag": "node ./src/cdp.mjs diag summary",
+    "mcp": "node ./mcp/server.mjs",
+    "test": "node --test ./plugins/antigravity/plugin.test.mjs ./mcp/mcp.test.mjs"
   }
 }

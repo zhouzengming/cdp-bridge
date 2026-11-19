@@ -1,0 +1,14 @@
+{
+  "name": "cdp-bridge-mcp",
+  "displayName": "CDP Bridge (MCP)",
+  "version": "1.5.0",
+  "description": "Persistent Chrome DevTools Protocol (CDP) bridge with zero-dependency Stdio MCP server, workflow skill, and direct-port guard hook (ideal for native Windows & sandboxed agents).",
+  "author": {
+    "name": "zhouzengming",
+    "url": "https://github.com/zhouzengming"
+  },
+  "homepage": "https://github.com/zhouzengming/cdp-bridge",
+  "repository": "https://github.com/zhouzengming/cdp-bridge",
+  "license": "MIT",
+  "logo": "assets/logo.svg"
+}

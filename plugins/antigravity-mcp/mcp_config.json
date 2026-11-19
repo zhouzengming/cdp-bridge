@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "cdp-bridge": {
+      "command": "cdp-mcp"
+    }
+  }
+}
