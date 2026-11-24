@@ -1,6 +1,6 @@
 ---
 name: cdp-bridge
-description: "通过本地常驻 CDP 桥接守护进程（cdp-bridge）与命令行客户端（cdp）控制已打开的 Chrome/Edge 浏览器，执行页面元素快照、带虚拟指针显示的点击/悬停/滚轮滚动、表单与富文本输入、条件等待、截图及控制台与网络请求诊断。当需要进行交互式浏览器调试、前端端到端验收或操作已登录网页会话时使用。"
+description: "通过本地常驻 CDP 桥接守护进程（cdp-bridge）与命令行客户端（cdp）控制已打开的 Chrome/Edge 浏览器，执行页面元素快照、带虚拟指针显示的点击/悬停/滚轮滚动、表单与富文本输入、条件等待、截图、零依赖操作过程视频录制（.webm）及控制台与网络请求诊断。当需要进行交互式浏览器调试、前端端到端功能验收录屏或操作已登录网页会话时使用。"
 ---
 
 # cdp-bridge 浏览器调试与验收指南
@@ -19,7 +19,7 @@ description: "通过本地常驻 CDP 桥接守护进程（cdp-bridge）与命令
 4. **控制输出体积节省上下文**：
    - 读取纯文本或表达式返回值加 `--raw`（如 `cdp text 426B5451 main --raw`、`cdp eval 426B5451 "location.href" --raw`）。
    - 排查接口时为 `cdp network` 加上过滤条件（如 `cdp network 426B5451 --all --type fetch,xhr --url "/api/"`），避免无过滤倾倒全量静态资源。
-5. **多步连续交互优先用 `cdp batch`**：需要连续执行“输入 → 点击 → 等待 → 读文本/截图”时，用 `cdp batch <target> --stdin` 一次完成，减少多次进程启动开销。
+5. **多步连续交互优先用 `cdp batch`，测试验收优先配合 `cdp record` 录屏留档**：需要连续执行“输入 → 点击 → 等待 → 读文本/截图”时，用 `cdp batch <target> --stdin`（或 `--record ./acceptance.webm`）一次完成。
 
 ## 标准工作流速查
 
@@ -86,7 +86,36 @@ cdp batch 426B5451 --stdin <<'EOF'
 EOF
 ```
 
-### 4. 控制台日志与网络请求精准诊断
+### 4. 功能演示与端到端测试验收录屏（`record` / `batch --record`）
+
+> 零第三方依赖、无需安装 `ffmpeg` 即可直接编码生成带可拖拽进度条与虚拟鼠标轨迹的 `.webm`（VP9/VP8）视频；若本机装有 `ffmpeg`，也可直接指定 `.mp4` 或 `.gif` 后缀。录制期间该标签页的虚拟指针自动切换为 `demo` 平滑轨迹模式（`180ms`）以便清晰展示每一步操作。
+
+```bash
+# 方式 A：跨多条命令录制完整验收流程（支持跨页面导航与刷新）
+cdp record start 426B5451 ./acceptance.webm
+cdp fill 426B5451 ".ProseMirror" "执行端到端验收测试"
+cdp click 426B5451 "button[aria-label='发送']"
+cdp scroll 426B5451 down 360
+cdp wait 426B5451 ".status-badge" --text "已完成" --timeout 20000
+cdp record stop 426B5451
+
+# 方式 B：batch 流水线一键录制（即使中途某一步骤失败报错，也会自动保存截至失败瞬间的现场视频）
+cdp batch 426B5451 --record ./batch-acceptance.webm --stdin <<'EOF'
+[
+  { "cmd": "click", "selector": "text=新建任务" },
+  { "cmd": "fill", "selector": "input[name='title']", "text": "自动验收用例" },
+  { "cmd": "click", "selector": "button[type='submit']" },
+  { "cmd": "wait", "text": "保存成功", "timeout": 10000 }
+]
+EOF
+
+# 方式 C：单命令定时截取片段 / 查看活跃录制状态 / 放弃并清理录制
+cdp record 426B5451 ./clip.webm --duration 5000
+cdp record status
+cdp record cancel 426B5451
+```
+
+### 5. 控制台日志与网络请求精准诊断
 
 ```bash
 # 查看近期错误/警告与未捕获异常（加 --all 包含 console.log/info，--grep 按正则过滤）
@@ -98,7 +127,7 @@ cdp network 426B5451
 cdp network 426B5451 --all --type fetch,xhr --url "/api/v1/" --status 2xx,4xx,5xx
 ```
 
-### 5. 自定义 JS 执行、原始 CDP 协议与诊断统计
+### 6. 自定义 JS 执行、原始 CDP 协议与诊断统计
 
 ```bash
 # 执行表达式并直接输出纯值（--timeout 可放宽慢请求超时）

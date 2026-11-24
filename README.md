@@ -59,7 +59,9 @@ flowchart LR
    - **`fill`**：对 `<input>` / `<textarea>` 调用原型链原生 `value` setter 触发 React/Vue 受控状态同步；对 `.ProseMirror` / TipTap / Lexical 等 `contenteditable` 富文本编辑器自动通过 `Input.insertText` 写入并完整保留多行段落。
 4. **防后台冻结与全量会话监控收口**
    - 守护进程统一托管页面 Session 附着，自动开启 `Runtime` / `Log` / `Network` 环形缓冲（含失败请求响应体前 1000 字符摘要），自动调用 `Page.setWebLifecycleState({ state: "active" })` 解除后台标签页节流冻结，并在后台标签页截图前自动唤醒防止卡死。
-5. **批量流水线 (`batch`) 与工具自诊断遥测 (`diag`)**
+5. **零依赖验收录屏 (`record` / `batch --record`) 与批量流水线 (`batch`)、自诊断遥测 (`diag`)**
+   - **免 `ffmpeg` 原生录屏**：守护进程通过 `Page.startScreencast` 跨多轮命令持续流式采集画面并落盘缓冲（常驻进程堆内存零膨胀），停止时通过隐藏后台 `about:blank` 工作页调用浏览器内置 WebCodecs `VideoEncoder`（VP9/VP8）与纯 JS EBML WebM 封装器（[`src/webm-muxer.mjs`](./src/webm-muxer.mjs)）生成带 `Cues` 进度索引的可播放 `.webm` 视频；若本机装有 `ffmpeg`，也可直接输出 `.mp4` 或 `.gif`。
+   - **录制态自动慢动作虚拟指针**：录制期间对应标签页的 `click` / `fill` / `hover` / `scroll` 自动从 `0ms` `fast` 切换为 `180ms` `demo` 平滑轨迹，让水波纹、焦点框与滚轮角标清晰入镜；`cdp batch --record <out.webm>` 即使中途步骤报错也会在 `finally` 中自动封存截至失败瞬间的现场视频。
    - 支持单次进程内顺序执行多步交互；内置 `logs/diag.jsonl` 调用遥测（单条摘要控制在 100 字以内、自动脱敏 JWT/Token/Cookie、单文件满 10MB 自动滚动保留 3 份归档）与 `cdp diag` 自分析看板。
 
 ---
@@ -235,6 +237,16 @@ cdp screenshot 426B5451 ./viewport.png
 cdp screenshot 426B5451 ./pointer-state.png --with-cursor
 cdp shot 426B5451 ./dialog.png --selector "[role='dialog']" --keep-cursor
 cdp screenshot 426B5451 ./full.webp --full-page --format webp --quality 85
+
+# 操作过程录屏（别名：record / page-record / screencast；零依赖直接生成 .webm，装有 ffmpeg 时支持 .mp4 / .gif）
+cdp record start 426B5451 ./acceptance.webm
+# ... 执行任意多步 cdp click / fill / scroll / goto / reload（录制期间虚拟指针自动升级为 demo 平滑慢动作）...
+cdp record status
+cdp record stop 426B5451
+
+# 单命令定时录制 5 秒片段，或放弃当前录制
+cdp record 426B5451 ./clip.webm --duration 5000
+cdp record cancel 426B5451
 ```
 
 ### 4. 表单/富文本输入、点击、悬停、滚轮滚动与批量流水线（`fill` / `click` / `hover` / `scroll` / `batch`）
@@ -261,8 +273,8 @@ cdp scroll 426B5451 "[role='dialog']" down 500
 cdp scroll 426B5451 ".footer-cta" into-view
 cdp scroll 426B5451 top
 
-# 在单次进程与单条连接内按序执行多步操作（支持 JSON 数组或 NDJSON）
-cdp batch 426B5451 --stdin <<'EOF'
+# 在单次进程与单条连接内按序执行多步操作（加 --record <out.webm> 可全程录屏，即使步骤失败也自动保存失败现场视频）
+cdp batch 426B5451 --record ./acceptance.webm --stdin <<'EOF'
 [
   { "cmd": "fill", "selector": ".ProseMirror", "text": "测试批量交互" },
   { "cmd": "click", "selector": "button[aria-label='发送']" },
@@ -339,6 +351,7 @@ cdp raw Target.activateTarget --params '{"targetId":"426B54510000000000000000000
   | `src/cdp.mjs` | CLI 客户端（页面快照、高层交互与滚轮原语、`batch` 流水线与按需自启动） |
   | `src/win-spawn.mjs` | 原生 Windows WMI (`Win32_Process.Create`) 脱离 Job Object 无黑框后台启动模块 |
   | `src/cursor.mjs` | Top-Layer (`popover="manual"`) + 封闭 Shadow DOM 虚拟指针与点击接管模块 |
+  | `src/recorder.mjs` + `src/webm-muxer.mjs` | 零依赖浏览器 WebCodecs 视频编码调度器与纯 JS EBML WebM 封装器（含可选 `ffmpeg` MP4/GIF 转码） |
   | `src/diag.mjs` | 工具调用遥测采集、敏感凭据脱敏轮转与 `cdp diag` 自分析模块 |
   | `mcp/server.mjs` + `mcp/tools.mjs` | 零依赖 Stdio MCP Server（`cdp-mcp`，共享底层 Named Pipe/Socket，免除 Windows 转义与乱码） |
   | `skills/cdp-bridge/` | 面向 AI Coding Agent 的标准技能包（含 `SKILL.md`） |

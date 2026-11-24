@@ -1,7 +1,7 @@
 {
   "name": "cdp-bridge",
-  "version": "1.5.0",
-  "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, Stdio MCP server, and visual ghost cursor for AI coding agents",
+  "version": "1.6.0",
+  "description": "Persistent Chrome DevTools Protocol (CDP) bridge daemon, CLI client, Stdio MCP server, screen recorder, and visual ghost cursor for AI coding agents",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -20,6 +20,6 @@
     "pages": "node ./src/cdp.mjs pages",
     "diag": "node ./src/cdp.mjs diag summary",
     "mcp": "node ./mcp/server.mjs",
-    "test": "node --test ./plugins/antigravity/plugin.test.mjs ./plugins/codex/plugin.test.mjs ./plugins/claude-code/plugin.test.mjs ./mcp/mcp.test.mjs"
+    "test": "node --test ./src/record.test.mjs ./plugins/antigravity/plugin.test.mjs ./plugins/codex/plugin.test.mjs ./plugins/claude-code/plugin.test.mjs ./mcp/mcp.test.mjs"
   }
 }

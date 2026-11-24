@@ -1,7 +1,7 @@
 {
   "name": "cdp-bridge",
   "displayName": "CDP Bridge",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Persistent Chrome DevTools Protocol (CDP) bridge workflow skill, direct-port bypass guard hook, and workspace rules for Antigravity.",
   "author": {
     "name": "zhouzengming",

@@ -1,7 +1,7 @@
 {
   "name": "cdp-bridge-mcp",
-  "version": "1.5.0",
-  "description": "MCP + CLI edition of cdp-bridge for OpenAI Codex: exposes 16 structured UTF-8 MCP browser tools over the shared cdp-bridge daemon (ideal for native Windows PowerShell/CMD and sandboxed sessions), plus workflow skill and PreToolUse guard hook.",
+  "version": "1.6.0",
+  "description": "MCP + CLI edition of cdp-bridge for OpenAI Codex: exposes 17 structured UTF-8 MCP browser tools (including zero-dependency .webm screen recording) over the shared cdp-bridge daemon (ideal for native Windows PowerShell/CMD and sandboxed sessions), plus workflow skill and PreToolUse guard hook.",
   "author": {
     "name": "zhouzengming",
     "url": "https://github.com/zhouzengming"
@@ -24,11 +24,11 @@
   "interface": {
     "displayName": "CDP Bridge (MCP)",
     "shortDescription": "Structured MCP browser tools + persistent CDP bridge for Codex (ideal on Windows)",
-    "longDescription": "Exposes 16 zero-dependency Stdio MCP tools (cdp_pages, cdp_elements, cdp_click, cdp_fill, cdp_hover, cdp_scroll, cdp_wait, cdp_screenshot, cdp_logs, cdp_network, cdp_batch, cdp_eval, cdp_call, etc.) backed by the shared cdp-bridge daemon over Windows Named Pipe or Linux Unix Socket. Eliminates PowerShell quoting and CP936 encoding issues while keeping single-handshake browser auth across windows.",
+    "longDescription": "Exposes 17 zero-dependency Stdio MCP tools (cdp_pages, cdp_elements, cdp_click, cdp_fill, cdp_hover, cdp_scroll, cdp_wait, cdp_screenshot, cdp_record, cdp_logs, cdp_network, cdp_batch, cdp_eval, cdp_call, etc.) backed by the shared cdp-bridge daemon over Windows Named Pipe or Linux Unix Socket. Eliminates PowerShell quoting and CP936 encoding issues while keeping single-handshake browser auth across windows.",
     "developerName": "zhouzengming",
     "category": "Productivity",
     "capabilities": [
-      "16 structured UTF-8 MCP tools with readOnlyHint annotations",
+      "17 structured UTF-8 MCP tools with readOnlyHint annotations and WebM screen recording",
       "Shared single-handshake connection over Windows Named Pipe or Linux Unix Socket",
       "Zero PowerShell quoting or CP936/GBK encoding issues on native Windows",
       "Top-Layer visual ghost cursor and click-only human takeover",

@@ -360,6 +360,60 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "cdp_record",
+    description:
+      "Record browser page interactions (including Top-Layer ghost cursor, click ripples, and scroll badges) to a playable .webm video file (zero-dependency; .mp4/.gif supported when ffmpeg is installed).",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: {
+          type: "string",
+          enum: ["start", "stop", "status", "cancel", "clip"],
+          description:
+            "'start' begins background recording across tool calls; 'stop' finalizes & saves the video; 'clip' records for durationMs in one call; 'status' inspects active recordings; 'cancel' discards.",
+        },
+        target: {
+          type: "string",
+          description:
+            "Target ID/8-char prefix, URL, or title (required for start/clip; optional for stop/cancel if only 1 recording is active).",
+        },
+        outputPath: {
+          type: "string",
+          description: "Output video file path (e.g. './acceptance.webm').",
+        },
+        durationMs: {
+          type: "integer",
+          description: "For action='clip': duration in ms to record before stopping.",
+        },
+        fps: { type: "integer", description: "Max frame rate (default: 30)." },
+        quality: { type: "integer", description: "JPEG capture quality 10-100 (default: 92)." },
+        bitrate: { type: "integer", description: "Target video bitrate in bps (default: auto >=12Mbps)." },
+        maxWidth: { type: "integer", description: "Max video width in px (default: 2560)." },
+        maxHeight: { type: "integer", description: "Max video height in px (default: 1440)." },
+        maxDurationMs: {
+          type: "integer",
+          description: "Auto-stop safety cap in ms (default: 180000).",
+        },
+        noFocus: {
+          type: "boolean",
+          description: "Skip bringing the target tab to front when starting.",
+        },
+        keepFramesDir: {
+          type: "string",
+          description: "Optional directory to also export raw captured JPEG frames on stop.",
+        },
+        timeoutMs: { type: "integer" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cdp_logs",
     description:
       "Read captured console errors/warnings/uncaught exceptions (or all console logs) from the page.",
@@ -432,6 +486,15 @@ export const MCP_TOOLS = [
           items: { type: "object" },
         },
         continueOnError: { type: "boolean" },
+        recordPath: {
+          type: "string",
+          description:
+            "Optional output video path (e.g. './acceptance.webm') to record the entire batch interaction, saved even if a step fails.",
+        },
+        fps: {
+          type: "integer",
+          description: "Optional frame rate when recordPath is set (default: 30).",
+        },
         cursor: { type: "string", enum: CURSOR_ENUM },
         timeoutMs: { type: "integer" },
       },
@@ -730,6 +793,42 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       break;
     }
 
+    case "cdp_record": {
+      const action = String(args.action || "").toLowerCase();
+      cliArgs = ["record", action];
+      if (args.target) cliArgs.push("--target", String(args.target));
+      if (args.outputPath) cliArgs.push("--output", String(args.outputPath));
+      if (args.durationMs !== undefined) {
+        cliArgs.push("--duration", String(args.durationMs));
+      }
+      if (args.fps !== undefined) cliArgs.push("--fps", String(args.fps));
+      if (args.quality !== undefined) {
+        cliArgs.push("--quality", String(args.quality));
+      }
+      if (args.bitrate !== undefined) {
+        cliArgs.push("--bitrate", String(args.bitrate));
+      }
+      if (args.maxWidth !== undefined) {
+        cliArgs.push("--max-width", String(args.maxWidth));
+      }
+      if (args.maxHeight !== undefined) {
+        cliArgs.push("--max-height", String(args.maxHeight));
+      }
+      if (args.maxDurationMs !== undefined) {
+        cliArgs.push("--max-duration", String(args.maxDurationMs));
+      }
+      if (args.noFocus) cliArgs.push("--no-focus");
+      if (args.keepFramesDir) {
+        cliArgs.push("--keep-frames", String(args.keepFramesDir));
+      }
+      if (action === "stop" || action === "clip") {
+        const clipExtra = action === "clip" ? Number(args.durationMs || 5_000) : 0;
+        outerTimeoutMs = Math.max(outerTimeoutMs, clipExtra + 75_000);
+      }
+      pushCommonFlags(cliArgs, args);
+      break;
+    }
+
     case "cdp_logs": {
       cliArgs = ["logs", "--target", String(args.target)];
       if (args.all) cliArgs.push("--all");
@@ -759,8 +858,13 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       cliArgs = ["batch", "--stdin"];
       if (args.target) cliArgs.push("--target", String(args.target));
       if (args.continueOnError) cliArgs.push("--continue-on-error");
+      if (args.recordPath) cliArgs.push("--record", String(args.recordPath));
+      if (args.fps !== undefined) cliArgs.push("--fps", String(args.fps));
       stdinText = JSON.stringify(args.steps || []);
-      outerTimeoutMs = Math.max(outerTimeoutMs, 60_000);
+      outerTimeoutMs = Math.max(
+        outerTimeoutMs,
+        args.recordPath ? 95_000 : 60_000,
+      );
       pushCommonFlags(cliArgs, args);
       break;
     }
