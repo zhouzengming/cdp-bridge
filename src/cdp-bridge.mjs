@@ -775,7 +775,85 @@ async function serveBridge() {
   const sessionNetwork = new Map();
   const pendingNetworkRequests = new Map();
   const failedBodyCandidates = new Map();
+  const recordingsByTarget = new Map();
+  const recordingsBySession = new Map();
+  const activeRecordingsPath = path.join(stateDir, "active-recordings.json");
   const MAX_RING_BUFFER = 300;
+
+  function syncActiveRecordingsFile() {
+    try {
+      if (recordingsByTarget.size === 0) {
+        fs.unlinkSync(activeRecordingsPath);
+        return;
+      }
+      const snapshot = {};
+      for (const [tid, rec] of recordingsByTarget.entries()) {
+        snapshot[tid] = {
+          recordingId: rec.recordingId,
+          startedAtMs: rec.startedAtMs,
+          outputPath: rec.outputPath,
+        };
+      }
+      fs.writeFileSync(activeRecordingsPath, JSON.stringify(snapshot, null, 2));
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        // Ignore transient state file write errors
+      }
+    }
+  }
+
+  function appendScreencastFrame(rec, base64Data, metadata = {}) {
+    if (!rec || rec.stopping || !base64Data || rec.frames.length >= rec.maxFrames) {
+      return;
+    }
+    const nowMs = Date.now();
+    const idx = rec.nextFrameIndex++;
+    const fileName = `frame-${String(idx).padStart(5, "0")}.jpg`;
+    const filePath = path.join(rec.spoolDir, fileName);
+    const buf = Buffer.from(base64Data, "base64");
+    rec.frames.push({
+      index: idx,
+      file: filePath,
+      bytes: buf.length,
+      wallTimeMs: nowMs,
+      deviceWidth: metadata.deviceWidth || 0,
+      deviceHeight: metadata.deviceHeight || 0,
+    });
+    rec.totalBytes += buf.length;
+    const writeTask = fs.promises.writeFile(filePath, buf).catch(() => {});
+    rec.pendingWrites.add(writeTask);
+    void writeTask.finally(() => rec.pendingWrites.delete(writeTask));
+  }
+
+  function findActiveRecording(targetQuery) {
+    if (!targetQuery) {
+      if (recordingsByTarget.size === 1) {
+        return recordingsByTarget.values().next().value;
+      }
+      if (recordingsByTarget.size === 0) {
+        throw new Error("No active screen recording session is currently running.");
+      }
+      const activeIds = Array.from(recordingsByTarget.keys())
+        .map((id) => id.slice(0, 8))
+        .join(", ");
+      throw new Error(
+        `Multiple recordings are active (${activeIds}); specify <target> to select one.`,
+      );
+    }
+    const qLower = String(targetQuery).toLowerCase();
+    for (const [tid, rec] of recordingsByTarget.entries()) {
+      if (
+        tid.toLowerCase() === qLower ||
+        tid.toLowerCase().startsWith(qLower) ||
+        rec.recordingId.toLowerCase() === qLower ||
+        (rec.url && rec.url.toLowerCase().includes(qLower)) ||
+        (rec.title && rec.title.toLowerCase().includes(qLower))
+      ) {
+        return rec;
+      }
+    }
+    throw new Error(`No active recording matches "${targetQuery}".`);
+  }
 
   function settleReadyWaiters(err = null) {
     for (const waiter of readyWaiters) {
@@ -843,6 +921,7 @@ async function serveBridge() {
       handshakeCount,
       commandsForwarded,
       activePageSessions: pageSessions.size,
+      activeRecordings: recordingsByTarget.size,
     };
   }
 
@@ -1067,6 +1146,203 @@ async function serveBridge() {
         : all.filter((r) => !r.ok || r.status >= 400);
       return { requests };
     }
+    if (method === "bridge.record.status") {
+      const now = Date.now();
+      const list = Array.from(recordingsByTarget.values()).map((rec) => ({
+        recordingId: rec.recordingId,
+        targetId: rec.targetId,
+        title: rec.title,
+        url: rec.url,
+        outputPath: rec.outputPath,
+        startedAt: new Date(rec.startedAtMs).toISOString(),
+        elapsedMs: now - rec.startedAtMs,
+        capturedFrames: rec.frames.length,
+        totalBytes: rec.totalBytes,
+        autoStopped: rec.autoStopped,
+      }));
+      return { count: list.length, recordings: list };
+    }
+    if (method === "bridge.record.start") {
+      const page = await resolvePageSession(params);
+      if (recordingsByTarget.has(page.targetId)) {
+        throw new Error(
+          `A screen recording is already running on target ${page.targetId.slice(0, 8)}. Stop or cancel it first.`,
+        );
+      }
+      const recordingId = `rec-${Date.now()}-${page.targetId.slice(0, 8).toLowerCase()}`;
+      const spoolDir = path.join(stateDir, "recordings", recordingId);
+      fs.mkdirSync(spoolDir, { recursive: true });
+
+      const quality = Math.max(10, Math.min(100, Number(params.quality) || 92));
+      const maxWidth = Math.max(64, Number(params.maxWidth) || 2560);
+      const maxHeight = Math.max(64, Number(params.maxHeight) || 1440);
+      const everyNthFrame = Math.max(1, Number(params.everyNthFrame) || 1);
+      const maxDurationMs = Math.max(
+        1_000,
+        Math.min(600_000, Number(params.maxDurationMs) || 180_000),
+      );
+      const maxFrames = Math.max(10, Math.min(10_000, Number(params.maxFrames) || 3600));
+
+      const rec = {
+        recordingId,
+        targetId: page.targetId,
+        sessionId: page.sessionId,
+        title: page.title,
+        url: page.url,
+        outputPath: params.outputPath || "",
+        spoolDir,
+        quality,
+        maxWidth,
+        maxHeight,
+        maxFrames,
+        startedAtMs: Date.now(),
+        nextFrameIndex: 0,
+        totalBytes: 0,
+        frames: [],
+        pendingWrites: new Set(),
+        stopping: false,
+        autoStopped: false,
+        maxTimer: null,
+      };
+
+      recordingsByTarget.set(page.targetId, rec);
+      recordingsBySession.set(page.sessionId, rec);
+      syncActiveRecordingsFile();
+
+      try {
+        if (params.focus !== false) {
+          await forwardBrowserCommand("Page.bringToFront", {}, page.sessionId, 5_000).catch(
+            () => {},
+          );
+        }
+        await forwardBrowserCommand("Page.enable", {}, page.sessionId, 5_000);
+        await forwardBrowserCommand(
+          "Page.setWebLifecycleState",
+          { state: "active" },
+          page.sessionId,
+          5_000,
+        ).catch(() => {});
+
+        await forwardBrowserCommand(
+          "Page.startScreencast",
+          {
+            format: "jpeg",
+            quality,
+            maxWidth,
+            maxHeight,
+            everyNthFrame,
+          },
+          page.sessionId,
+          10_000,
+        );
+
+        // Wait briefly for initial compositor frame; capture one explicitly if page is static
+        await new Promise((resolve) => setTimeout(resolve, 140));
+        if (rec.frames.length === 0 && !rec.stopping) {
+          const initialShot = await forwardBrowserCommand(
+            "Page.captureScreenshot",
+            { format: "jpeg", quality },
+            page.sessionId,
+            5_000,
+          ).catch(() => null);
+          if (initialShot?.data) {
+            appendScreencastFrame(rec, initialShot.data);
+          }
+        }
+      } catch (err) {
+        recordingsByTarget.delete(page.targetId);
+        recordingsBySession.delete(page.sessionId);
+        syncActiveRecordingsFile();
+        try {
+          fs.rmSync(spoolDir, { recursive: true, force: true });
+        } catch {}
+        throw err;
+      }
+
+      rec.maxTimer = setTimeout(() => {
+        rec.autoStopped = true;
+        rec.stopping = true;
+        void forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
+          () => {},
+        );
+      }, maxDurationMs);
+      rec.maxTimer.unref?.();
+
+      return {
+        recording: true,
+        recordingId,
+        targetId: page.targetId,
+        title: page.title,
+        url: page.url,
+        outputPath: rec.outputPath,
+        startedAt: new Date(rec.startedAtMs).toISOString(),
+        quality,
+        maxWidth,
+        maxHeight,
+        maxDurationMs,
+      };
+    }
+    if (method === "bridge.record.stop") {
+      const rec = findActiveRecording(params.targetId || params.target);
+      if (rec.maxTimer) clearTimeout(rec.maxTimer);
+
+      // Capture final frame so last UI change is guaranteed in the video
+      if (!rec.autoStopped) {
+        const finalShot = await forwardBrowserCommand(
+          "Page.captureScreenshot",
+          { format: "jpeg", quality: rec.quality },
+          rec.sessionId,
+          4_000,
+        ).catch(() => null);
+        if (finalShot?.data) {
+          appendScreencastFrame(rec, finalShot.data);
+        }
+      }
+
+      rec.stopping = true;
+      await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
+        () => {},
+      );
+      await Promise.allSettled(Array.from(rec.pendingWrites));
+
+      const stoppedAtMs = Date.now();
+      recordingsByTarget.delete(rec.targetId);
+      recordingsBySession.delete(rec.sessionId);
+      syncActiveRecordingsFile();
+
+      return {
+        recordingId: rec.recordingId,
+        targetId: rec.targetId,
+        title: rec.title,
+        url: rec.url,
+        outputPath: rec.outputPath,
+        spoolDir: rec.spoolDir,
+        startedAtMs: rec.startedAtMs,
+        stoppedAtMs,
+        frames: rec.frames,
+      };
+    }
+    if (method === "bridge.record.cancel") {
+      const rec = findActiveRecording(params.targetId || params.target);
+      rec.stopping = true;
+      if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
+        () => {},
+      );
+      await Promise.allSettled(Array.from(rec.pendingWrites));
+      recordingsByTarget.delete(rec.targetId);
+      recordingsBySession.delete(rec.sessionId);
+      syncActiveRecordingsFile();
+      try {
+        fs.rmSync(rec.spoolDir, { recursive: true, force: true });
+      } catch {}
+      return {
+        cancelled: true,
+        recordingId: rec.recordingId,
+        targetId: rec.targetId,
+        discardedFrames: rec.frames.length,
+      };
+    }
     throw new Error(`Unknown bridge method: ${method}`);
   }
 
@@ -1169,6 +1445,17 @@ async function serveBridge() {
     }
     pendingBrowserCommands.clear();
 
+    for (const rec of recordingsByTarget.values()) {
+      rec.stopping = true;
+      if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      try {
+        fs.rmSync(rec.spoolDir, { recursive: true, force: true });
+      } catch {}
+    }
+    recordingsByTarget.clear();
+    recordingsBySession.clear();
+    syncActiveRecordingsFile();
+
     if (browserSocket && browserSocket.readyState === WebSocket.OPEN) {
       browserSocket.close(1000, "bridge shutdown");
     }
@@ -1182,6 +1469,28 @@ async function serveBridge() {
         pageSessions.delete(tid);
         initializedSessions.delete(sid);
       }
+    }
+    if (deadSid && recordingsBySession.has(deadSid)) {
+      const rec = recordingsBySession.get(deadSid);
+      rec.stopping = true;
+      if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      recordingsBySession.delete(deadSid);
+      recordingsByTarget.delete(rec.targetId);
+      syncActiveRecordingsFile();
+      try {
+        fs.rmSync(rec.spoolDir, { recursive: true, force: true });
+      } catch {}
+    }
+    if (targetId && recordingsByTarget.has(targetId)) {
+      const rec = recordingsByTarget.get(targetId);
+      rec.stopping = true;
+      if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      recordingsByTarget.delete(targetId);
+      recordingsBySession.delete(rec.sessionId);
+      syncActiveRecordingsFile();
+      try {
+        fs.rmSync(rec.spoolDir, { recursive: true, force: true });
+      } catch {}
     }
     if (deadSid) {
       initializedSessions.delete(deadSid);
@@ -1204,6 +1513,52 @@ async function serveBridge() {
     }
 
     if (!sessionId) {
+      return;
+    }
+
+    if (method === "Fetch.requestPaused") {
+      const reqUrl = String(params.request?.url || "");
+      if (reqUrl.startsWith("http://127.0.0.1/__cdp_video_encoder__")) {
+        void forwardBrowserCommand(
+          "Fetch.fulfillRequest",
+          {
+            requestId: params.requestId,
+            responseCode: 200,
+            responseHeaders: [
+              { name: "Content-Type", value: "text/html; charset=utf-8" },
+            ],
+            body: Buffer.from(
+              "<!doctype html><meta charset=utf-8><title>cdp-video-encoder</title>",
+              "utf8",
+            ).toString("base64"),
+          },
+          sessionId,
+          5_000,
+        ).catch(() => {});
+      } else if (params.requestId) {
+        void forwardBrowserCommand(
+          "Fetch.continueRequest",
+          { requestId: params.requestId },
+          sessionId,
+          5_000,
+        ).catch(() => {});
+      }
+      return;
+    }
+
+    if (method === "Page.screencastFrame") {
+      if (params.sessionId !== undefined) {
+        void forwardBrowserCommand(
+          "Page.screencastFrameAck",
+          { sessionId: params.sessionId },
+          sessionId,
+          5_000,
+        ).catch(() => {});
+      }
+      const rec = recordingsBySession.get(sessionId);
+      if (rec && !rec.stopping && params.data) {
+        appendScreencastFrame(rec, params.data, params.metadata || {});
+      }
       return;
     }
 

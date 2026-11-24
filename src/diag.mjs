@@ -46,6 +46,9 @@ const CANONICAL_COMMAND_MAP = {
   "page-screenshot": "page-screenshot",
   screenshot: "page-screenshot",
   shot: "page-screenshot",
+  "page-record": "page-record",
+  record: "page-record",
+  screencast: "page-record",
   "page-fill": "page-fill",
   fill: "page-fill",
   "page-type": "page-fill",
@@ -213,6 +216,9 @@ function buildResultPreviewAndMeta(canonicalCommand, data, telemetry = {}) {
     if (typeof data.completedSteps === "number") meta.completedSteps = data.completedSteps;
     if (typeof data.bytes === "number") meta.bytes = data.bytes;
     if (data.format) meta.format = data.format;
+    if (data.codec) meta.codec = data.codec;
+    if (typeof data.capturedFrames === "number") meta.capturedFrames = data.capturedFrames;
+    if (typeof data.durationMs === "number") meta.durationMs = data.durationMs;
     if (data.exceptionDetails) {
       meta.hasException = true;
       const desc =
@@ -244,6 +250,8 @@ function buildResultPreviewAndMeta(canonicalCommand, data, telemetry = {}) {
     rawPreview = data.text;
   } else if (canonicalCommand === "page-screenshot" && data.saved) {
     rawPreview = `saved=${data.saved} (${data.bytes}B)`;
+  } else if (canonicalCommand === "page-record" && data.saved) {
+    rawPreview = `saved=${data.saved} (${data.bytes}B, ${data.durationMs}ms, ${data.codec})`;
   } else if (canonicalCommand === "elements" && Array.isArray(data.elements)) {
     const sample = data.elements
       .slice(0, 4)

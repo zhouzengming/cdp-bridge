@@ -39,7 +39,7 @@ export function resolveCursorMode(flags = {}) {
 
 export const CURSOR_HELPER_SOURCE = `(() => {
   const SYM = Symbol.for("cdp.bridge.cursor");
-  if (window[SYM] && window[SYM].version === 4) return window[SYM];
+  if (window[SYM] && window[SYM].version === 7) return window[SYM];
   if (window[SYM] && typeof window[SYM].destroy === "function") {
     try { window[SYM].destroy(); } catch {}
   }
@@ -283,33 +283,69 @@ export const CURSOR_HELPER_SOURCE = `(() => {
 
   function spawnRipple(x, y, color) {
     if (!layerEl) return;
-    const ring = document.createElement("div");
-    ring.style.cssText = [
-      "position:fixed",
-      "left:" + x + "px",
-      "top:" + y + "px",
-      "width:36px",
-      "height:36px",
-      "margin-left:-18px",
-      "margin-top:-18px",
-      "border-radius:50%",
-      "border:2.5px solid " + color,
-      "background:rgba(59,130,246,0.16)",
-      "pointer-events:none",
-      "will-change:transform,opacity"
-    ].join(";");
-    layerEl.appendChild(ring);
-    try {
-      const anim = ring.animate(
-        [
-          { transform: "scale(0.25)", opacity: 0.95 },
-          { transform: "scale(1.45)", opacity: 0 }
-        ],
-        { duration: 460, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "forwards" }
-      );
-      anim.onfinish = () => ring.remove();
-    } catch {
-      setTimeout(() => ring.remove(), 460);
+    const primaryStroke = color || "rgba(56,189,248,0.58)";
+
+    // Translucent 2-wave concentric water ripple — airy & readable over text and buttons
+    const waves = [
+      {
+        delay: 0,
+        duration: 560,
+        endScale: 1.55,
+        peakOpacity: 0.45,
+        midOpacity: 0.26,
+        border: "1.8px solid " + primaryStroke,
+        shadow: "0 0 0 1px rgba(255,255,255,0.34)",
+        bg: "rgba(56,189,248,0.05)"
+      },
+      {
+        delay: 110,
+        duration: 500,
+        endScale: 1.18,
+        peakOpacity: 0.34,
+        midOpacity: 0.18,
+        border: "1.4px solid rgba(255,255,255,0.42)",
+        shadow: "0 0 0 1px rgba(37,99,235,0.34)",
+        bg: "transparent"
+      }
+    ];
+
+    for (const w of waves) {
+      const ring = document.createElement("div");
+      ring.style.cssText = [
+        "position:fixed",
+        "left:" + x + "px",
+        "top:" + y + "px",
+        "width:38px",
+        "height:38px",
+        "margin-left:-19px",
+        "margin-top:-19px",
+        "border-radius:50%",
+        "border:" + w.border,
+        "box-shadow:" + w.shadow,
+        "background:" + w.bg,
+        "opacity:0",
+        "pointer-events:none",
+        "will-change:transform,opacity"
+      ].join(";");
+      layerEl.insertBefore(ring, cursorEl);
+      try {
+        const anim = ring.animate(
+          [
+            { transform: "scale(0.28)", opacity: w.peakOpacity },
+            { transform: "scale(" + (w.endScale * 0.64).toFixed(2) + ")", opacity: w.midOpacity, offset: 0.45 },
+            { transform: "scale(" + w.endScale + ")", opacity: 0 }
+          ],
+          {
+            delay: w.delay,
+            duration: w.duration,
+            easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+            fill: "forwards"
+          }
+        );
+        anim.onfinish = () => ring.remove();
+      } catch {
+        setTimeout(() => ring.remove(), w.delay + w.duration);
+      }
     }
   }
 
@@ -510,7 +546,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   }
 
   const api = {
-    version: 4,
+    version: 7,
     destroy() {
       unbindUserTakeoverListeners();
       if (idleTimer) clearTimeout(idleTimer);
@@ -520,8 +556,13 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         host = null;
       }
     },
-    showClick(x, y, rect, flightMs = 140, guardMs = 140, persist = false) {
-      extendSimGuard(guardMs);
+    repromote() {
+      if (host && host.isConnected && !suspended) {
+        promoteTopLayer();
+      }
+    },
+    moveForClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false) {
+      extendSimGuard(guardMs + flightMs);
       const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
       lastActionState = {
         kind: "click",
@@ -529,37 +570,79 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         y,
         label: "Click",
         color: "rgba(37,99,235,0.92)",
-        boxColor: "rgba(37,99,235,0.8)",
+        boxColor: "rgba(56,189,248,0.55)",
         rect: cleanRect,
         persist
       };
       moveCursor(x, y, "Click", "rgba(37,99,235,0.92)", flightMs, persist);
-      if (!suspended) {
-        spawnRipple(x, y, "#3b82f6");
-        if (cleanRect) spawnHighlightBox(cleanRect, "rgba(37,99,235,0.8)", 440);
+    },
+    triggerClickImpact(x, y, rect) {
+      if (!ensureMounted() || suspended) return;
+      const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+      if (document.querySelector("dialog[open], [popover]:not([data-cdp-bridge-overlay])")) {
+        promoteTopLayer();
+      }
+      spawnRipple(x, y, "rgba(56,189,248,0.58)");
+      if (cleanRect) spawnHighlightBox(cleanRect, "rgba(56,189,248,0.48)", 480);
+      if (cursorEl) {
+        try {
+          cursorEl.animate(
+            [
+              { transform: "translate3d(" + x + "px," + y + "px,0) scale(1)" },
+              { transform: "translate3d(" + x + "px," + y + "px,0) scale(0.85)", offset: 0.36 },
+              { transform: "translate3d(" + x + "px," + y + "px,0) scale(1)" }
+            ],
+            { duration: 200, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+          );
+        } catch {}
       }
     },
-    showFill(el, label = "Fill", flightMs = 140, guardMs = 180, persist = false) {
-      if (!el) return;
-      extendSimGuard(guardMs);
+    showClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false) {
+      this.moveForClick(x, y, rect, flightMs, guardMs, persist);
+      this.triggerClickImpact(x, y, rect);
+    },
+    moveForFill(el, label = "Fill", flightMs = 140, guardMs = 240, persist = false) {
+      if (!el) return null;
+      extendSimGuard(guardMs + flightMs);
       const r = el.getBoundingClientRect();
       const cleanRect = { left: r.left, top: r.top, width: r.width, height: r.height };
-      const x = Math.round(r.left + Math.min(24, Math.max(8, r.width / 2)));
-      const y = Math.round(r.top + Math.min(20, Math.max(8, r.height / 2)));
+      const x = Math.round(r.left + Math.min(24, Math.max(10, r.width / 2)));
+      const y = Math.round(r.top + Math.min(20, Math.max(10, r.height / 2)));
       lastActionState = {
         kind: "fill",
         x,
         y,
         label,
         color: "rgba(16,185,129,0.92)",
-        boxColor: "rgba(16,185,129,0.85)",
+        boxColor: "rgba(16,185,129,0.65)",
         rect: cleanRect,
         persist
       };
       moveCursor(x, y, label, "rgba(16,185,129,0.92)", flightMs, persist);
-      if (!suspended) {
-        spawnHighlightBox(cleanRect, "rgba(16,185,129,0.85)", 680);
+      return { x, y, cleanRect };
+    },
+    triggerFillImpact(pos) {
+      if (!pos || !ensureMounted() || suspended) return;
+      spawnRipple(pos.x, pos.y, "rgba(16,185,129,0.52)");
+      if (pos.cleanRect) {
+        spawnHighlightBox(pos.cleanRect, "rgba(16,185,129,0.58)", 620);
       }
+      if (cursorEl) {
+        try {
+          cursorEl.animate(
+            [
+              { transform: "translate3d(" + pos.x + "px," + pos.y + "px,0) scale(1)" },
+              { transform: "translate3d(" + pos.x + "px," + pos.y + "px,0) scale(0.86)", offset: 0.36 },
+              { transform: "translate3d(" + pos.x + "px," + pos.y + "px,0) scale(1)" }
+            ],
+            { duration: 190, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+          );
+        } catch {}
+      }
+    },
+    showFill(el, label = "Fill", flightMs = 140, guardMs = 240, persist = false) {
+      const pos = this.moveForFill(el, label, flightMs, guardMs, persist);
+      this.triggerFillImpact(pos);
     },
     showHover(x, y, rect = null, flightMs = 160, guardMs = 160, persist = true) {
       extendSimGuard(guardMs);

@@ -8,6 +8,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CURSOR_HELPER_SOURCE, resolveCursorMode } from "./cursor.mjs";
 import { recordCliInvocation, runDiagCommand } from "./diag.mjs";
+import {
+  finalizeRecordingVideo,
+  resolveRecordingOutputPath,
+} from "./recorder.mjs";
 
 process.stdout?.setDefaultEncoding?.("utf8");
 process.stderr?.setDefaultEncoding?.("utf8");
@@ -79,11 +83,43 @@ function getSocketState() {
       ? `\\\\.\\pipe\\cdp-bridge-${getUid()}`
       : path.join(runtimeDir, "bridge.sock"));
   const isNamedPipe = isWindows && /^\\\\[.?]\\pipe\\/i.test(socketPath);
-  const clientSessionsPath = path.join(
-    isNamedPipe ? runtimeDir : path.dirname(socketPath),
-    "client-sessions.json",
+  const stateBaseDir = isNamedPipe ? runtimeDir : path.dirname(socketPath);
+  const clientSessionsPath = path.join(stateBaseDir, "client-sessions.json");
+  const activeRecordingsPath = path.join(
+    stateBaseDir,
+    "active-recordings.json",
   );
-  return { runtimeDir, socketPath, isNamedPipe, clientSessionsPath };
+  return {
+    runtimeDir,
+    socketPath,
+    isNamedPipe,
+    clientSessionsPath,
+    activeRecordingsPath,
+  };
+}
+
+function isTargetActivelyRecording(targetId) {
+  if (!targetId) return false;
+  const { activeRecordingsPath } = getSocketState();
+  try {
+    if (!fs.existsSync(activeRecordingsPath)) return false;
+    const active = JSON.parse(fs.readFileSync(activeRecordingsPath, "utf8"));
+    return Boolean(active && active[targetId]);
+  } catch {
+    return false;
+  }
+}
+
+function resolvePageCursorMode(flags = {}, page = null) {
+  if (
+    !flags["no-cursor"] &&
+    flags.cursor === undefined &&
+    process.env.CDP_CURSOR === undefined &&
+    isTargetActivelyRecording(page?.targetId)
+  ) {
+    return "demo";
+  }
+  return resolveCursorMode(flags);
 }
 
 function loadClientSessions() {
@@ -1053,21 +1089,27 @@ async function fillInPage(page, selector, text, options = {}) {
       if (!el) return { ok: false, error: "Element not found: " + ${JSON.stringify(selector)} };
 
       el.scrollIntoView({ behavior: "instant", block: "center" });
+      let fillCursor = null;
+      let fillPos = null;
       if (${JSON.stringify(cursorMode !== "off")}) {
         try {
-          (${CURSOR_HELPER_SOURCE}).showFill(
+          fillCursor = (${CURSOR_HELPER_SOURCE});
+          fillPos = fillCursor.moveForFill(
             el,
             ${JSON.stringify(clear ? "Clear" : "Fill")},
-            ${cursorMode === "demo" ? 200 : 140},
-            260,
+            ${cursorMode === "demo" ? 190 : 95},
+            280,
             ${JSON.stringify(cursorMode === "persist")}
           );
         } catch {}
         if (${JSON.stringify(cursorMode === "demo")}) {
-          await new Promise((r) => setTimeout(r, 180));
+          await new Promise((r) => setTimeout(r, 190));
         }
       }
       el.focus();
+      if (fillCursor && fillPos) {
+        try { fillCursor.triggerFillImpact(fillPos); } catch {}
+      }
 
       if (el.isContentEditable) {
         const sel = window.getSelection();
@@ -1227,6 +1269,13 @@ async function clickInPage(page, selectorOrText, options = {}) {
     timeoutMs = 15_000,
   } = options;
 
+  const coordMatch = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/.exec(
+    String(selectorOrText || ""),
+  );
+  const clickCoords = coordMatch
+    ? { x: Math.round(Number(coordMatch[1])), y: Math.round(Number(coordMatch[2])) }
+    : null;
+
   const isTextPrefix = selectorOrText.startsWith("text=");
   const forceText = byText || isTextPrefix;
   const query = isTextPrefix ? selectorOrText.slice(5) : selectorOrText;
@@ -1243,7 +1292,15 @@ async function clickInPage(page, selectorOrText, options = {}) {
 
     let el = null;
     let matchedBy = "selector";
-    if (!${JSON.stringify(forceText)}) {
+    let explicitCx = null;
+    let explicitCy = null;
+
+    if (${JSON.stringify(clickCoords)}) {
+      matchedBy = "coords";
+      explicitCx = ${clickCoords ? clickCoords.x : 0};
+      explicitCy = ${clickCoords ? clickCoords.y : 0};
+      el = document.elementFromPoint(explicitCx, explicitCy) || document.body;
+    } else if (!${JSON.stringify(forceText)}) {
       try {
         const all = Array.from(document.querySelectorAll(${JSON.stringify(query)}));
         const visible = all.filter(isVisible);
@@ -1256,6 +1313,38 @@ async function clickInPage(page, selectorOrText, options = {}) {
 
     if (!el) {
       matchedBy = "text";
+      const q = ${JSON.stringify(query)};
+      const qNorm = q.trim();
+
+      function matchTextPool(selectorStr) {
+        const rawNodes = Array.from(document.querySelectorAll(selectorStr));
+        const nodes = ${JSON.stringify(includeHidden)} ? rawNodes : rawNodes.filter(isVisible);
+        const exactMatches = [];
+        const partialMatches = [];
+        for (const node of nodes) {
+          const txt = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+          const aria = (node.getAttribute("aria-label") || "").trim();
+          const title = (node.getAttribute("title") || "").trim();
+          if (txt === qNorm || aria === qNorm || title === qNorm) {
+            exactMatches.push(node);
+          } else if (!${JSON.stringify(exact)} && (txt.includes(q) || aria.includes(q) || title.includes(q))) {
+            partialMatches.push(node);
+          }
+        }
+        const sortBySpecificity = (a, b) => {
+          const lenA = (a.innerText || a.textContent || "").trim().length;
+          const lenB = (b.innerText || b.textContent || "").trim().length;
+          if (lenA !== lenB) return lenA - lenB;
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return ra.width * ra.height - rb.width * rb.height;
+        };
+        exactMatches.sort(sortBySpecificity);
+        partialMatches.sort(sortBySpecificity);
+        return [...exactMatches, ...partialMatches];
+      }
+
+      // Tier 1: Interactive controls; Tier 2 fallback: plain text elements (span/div/p/td/headings/etc.)
       const CLICKABLE_CANDIDATES = [
         "button",
         "[role='button']",
@@ -1277,32 +1366,10 @@ async function clickInPage(page, selectorOrText, options = {}) {
         ".ant-tabs-tab"
       ].join(", ");
 
-      const rawNodes = Array.from(document.querySelectorAll(CLICKABLE_CANDIDATES));
-      const nodes = ${JSON.stringify(includeHidden)} ? rawNodes : rawNodes.filter(isVisible);
-      const q = ${JSON.stringify(query)};
-      const qNorm = q.trim();
-
-      const exactMatches = [];
-      const partialMatches = [];
-      for (const node of nodes) {
-        const txt = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
-        const aria = (node.getAttribute("aria-label") || "").trim();
-        const title = (node.getAttribute("title") || "").trim();
-        if (txt === qNorm || aria === qNorm || title === qNorm) {
-          exactMatches.push(node);
-        } else if (!${JSON.stringify(exact)} && (txt.includes(q) || aria.includes(q) || title.includes(q))) {
-          partialMatches.push(node);
-        }
+      let candidates = matchTextPool(CLICKABLE_CANDIDATES);
+      if (candidates.length === 0) {
+        candidates = matchTextPool("span, p, div, td, th, h1, h2, h3, h4, h5, h6, strong, em, code");
       }
-
-      // Prefer exact matches first, then more specific (shorter text) partial matches
-      partialMatches.sort((a, b) => {
-        const lenA = (a.innerText || a.textContent || "").trim().length;
-        const lenB = (b.innerText || b.textContent || "").trim().length;
-        return lenA - lenB;
-      });
-
-      const candidates = [...exactMatches, ...partialMatches];
       el = candidates[${index}] || null;
     }
 
@@ -1310,24 +1377,64 @@ async function clickInPage(page, selectorOrText, options = {}) {
       return { ok: false, error: "No element matches " + ${JSON.stringify(selectorOrText)} };
     }
 
-    el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-    const rect = el.getBoundingClientRect();
-    const cx = Math.round(rect.left + rect.width / 2);
-    const cy = Math.round(rect.top + rect.height / 2);
+    if (explicitCx === null) {
+      el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+    }
+    let rect = explicitCx !== null ? null : el.getBoundingClientRect();
+    let cx = explicitCx !== null ? explicitCx : Math.round(rect.left + rect.width / 2);
+    let cy = explicitCy !== null ? explicitCy : Math.round(rect.top + rect.height / 2);
 
+    // For wide block-level text elements (div/p/h1-h6/li/td), aim pointer at actual text glyphs
+    if (
+      explicitCx === null &&
+      rect &&
+      rect.width > 180 &&
+      !el.matches("button, [role='button'], input, textarea, select")
+    ) {
+      try {
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let firstNonEmpty = null;
+        let queryMatched = null;
+        let tNode;
+        while ((tNode = walker.nextNode())) {
+          const val = (tNode.nodeValue || "").trim();
+          if (val.length > 0) {
+            if (!firstNonEmpty) firstNonEmpty = tNode;
+            if (matchedBy === "text" && ${JSON.stringify(query)} && val.includes(${JSON.stringify(query)}.trim())) {
+              queryMatched = tNode;
+              break;
+            }
+          }
+        }
+        const bestTextNode = queryMatched || firstNonEmpty;
+        if (bestTextNode) {
+          const rng = document.createRange();
+          rng.selectNodeContents(bestTextNode);
+          const tr = rng.getBoundingClientRect();
+          if (tr.width > 0 && tr.height > 0) {
+            rect = tr;
+            cx = Math.round(tr.left + Math.min(tr.width / 2, 90));
+            cy = Math.round(tr.top + tr.height / 2);
+          }
+        }
+      } catch {}
+    }
+
+    let cursorHelper = null;
     if (${JSON.stringify(cursorMode !== "off")}) {
       try {
-        (${CURSOR_HELPER_SOURCE}).showClick(
+        cursorHelper = (${CURSOR_HELPER_SOURCE});
+        cursorHelper.moveForClick(
           cx,
           cy,
           rect,
-          ${cursorMode === "demo" ? 200 : 140},
-          ${nativeMouse ? 480 : 180},
+          ${cursorMode === "demo" ? 190 : 90},
+          ${nativeMouse ? 560 : 280},
           ${JSON.stringify(cursorMode === "persist")}
         );
       } catch {}
       if (${JSON.stringify(cursorMode === "demo")}) {
-        await new Promise((r) => setTimeout(r, 180));
+        await new Promise((r) => setTimeout(r, 190));
       }
     }
 
@@ -1359,6 +1466,14 @@ async function clickInPage(page, selectorOrText, options = {}) {
       }
       el.dispatchEvent(new MouseEvent("mouseup", { ...baseInit, buttons: 0 }));
       el.click();
+    }
+
+    if (cursorHelper && typeof cursorHelper.triggerClickImpact === "function") {
+      try { cursorHelper.triggerClickImpact(cx, cy, rect); } catch {}
+    }
+
+    if (${JSON.stringify(cursorMode === "demo" && !nativeMouse)}) {
+      await new Promise((r) => setTimeout(r, 240));
     }
 
     return {
@@ -2332,7 +2447,8 @@ async function capturePageScreenshot(page, outPathArg, flags = {}, timeoutMs = 3
       flags["show-cursor"] ||
       flags.withCursor ||
       flags.keepCursor ||
-      process.env.CDP_SCREENSHOT_CURSOR === "1",
+      process.env.CDP_SCREENSHOT_CURSOR === "1" ||
+      (!flags["no-cursor"] && isTargetActivelyRecording(page?.targetId)),
   );
   const preState = await evaluateInPage(
     page,
@@ -2726,6 +2842,7 @@ Page Inspection & Navigation:
   page-eval <target> [expr]               Evaluate JS in page (alias: eval; --file <path>, --stdin, --no-await, --raw)
   page-text <target> [selector]           Read page/element innerText (alias: text; --max-length <n>, --raw)
   page-screenshot <target> [out-path]     Save PNG/JPEG/WebP screenshot (aliases: screenshot, shot; --selector, --full-page, --with-cursor/--keep-cursor)
+  page-record <start|stop|status|cancel>  Record page interaction video to .webm/.mp4/.gif (alias: record, screencast; or --duration <ms>)
   page-navigate <target> <url>            Navigate tab to URL (aliases: navigate, goto, nav, page-goto; or --new <url>)
   page-reload <target> [--ignore-cache]   Reload page and wait until readyState is complete (alias: reload)
   page-wait <target> [selector-or-expr]   Wait for selector, --text <str>, or truthy JS expr (alias: wait; --timeout <ms>)
@@ -2735,7 +2852,7 @@ Page Interaction (React / Vue / Radix UI / TipTap ProseMirror compatible):
   page-click <target> <selector-or-text>  Click by CSS selector or visible text (alias: click; --text, --exact, --index <n>, --wait-for <sel>, --native)
   page-hover <target> <selector-or-x,y>   Move & hover pointer on element or x,y coords until user takeover (aliases: hover, move)
   page-scroll <target> [sel|x,y] [dir] [px] Simulate mouse wheel scroll & directional badge (aliases: scroll, wheel; down|up|left|right|top|bottom|into-view, --dx, --dy, --steps)
-  batch [target] [steps-json]             Run multiple steps sequentially over one connection (--file <path> | --stdin)
+  batch [target] [steps-json]             Run multiple steps sequentially over one connection (--file <path> | --stdin | --record <out.webm>)
 
 Diagnostics & Telemetry:
   page-logs <target> [--all] [--clear]    Read console errors/warnings or --all logs (alias: logs; --level, --grep, --limit)
@@ -2755,11 +2872,77 @@ Global Options (accepted before or after <command>):
   -c, --compact                           Print compact single-line JSON output`;
 }
 
+async function startPageRecording(targetQuery, outPathArg, flags = {}) {
+  const { outputPath } = resolveRecordingOutputPath(outPathArg);
+  const fps = flags.fps !== undefined ? Number(flags.fps) : 30;
+  const everyNthFrame =
+    flags["every-nth"] !== undefined
+      ? Number(flags["every-nth"])
+      : fps > 0 && fps < 30
+        ? Math.max(1, Math.round(30 / fps))
+        : 1;
+
+  const started = await requestBridge(
+    {
+      id: 1,
+      method: "bridge.record.start",
+      params: {
+        targetId: targetQuery,
+        outputPath,
+        quality: flags.quality !== undefined ? Number(flags.quality) : 92,
+        maxWidth: flags["max-width"] !== undefined ? Number(flags["max-width"]) : 2560,
+        maxHeight: flags["max-height"] !== undefined ? Number(flags["max-height"]) : 1440,
+        everyNthFrame,
+        maxDurationMs:
+          flags["max-duration"] !== undefined ? Number(flags["max-duration"]) : 180_000,
+        focus: !flags["no-focus"],
+      },
+    },
+    resolveTimeoutMs(flags, 20_000),
+  );
+  return started;
+}
+
+async function stopAndFinalizeRecording(targetQuery, outPathArg, flags = {}) {
+  const timeoutMs = resolveTimeoutMs(flags, 60_000);
+  const stopPayload = await requestBridge(
+    {
+      id: 1,
+      method: "bridge.record.stop",
+      params: targetQuery ? { targetId: targetQuery } : {},
+    },
+    Math.min(timeoutMs, 20_000),
+  );
+
+  const videoInfo = await finalizeRecordingVideo(
+    stopPayload,
+    {
+      outputPath: outPathArg || stopPayload.outputPath,
+      fps: flags.fps !== undefined ? Number(flags.fps) : 30,
+      bitrate: flags.bitrate !== undefined ? Number(flags.bitrate) : undefined,
+      keepFramesDir:
+        typeof flags["keep-frames"] === "string" ? flags["keep-frames"] : null,
+      timeoutMs,
+    },
+    requestBridge,
+  );
+
+  return {
+    recordingId: stopPayload.recordingId,
+    targetId: stopPayload.targetId,
+    title: stopPayload.title,
+    url: stopPayload.url,
+    ...videoInfo,
+  };
+}
+
 async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
   const {
     continueOnError = false,
     defaultTimeoutMs = 15_000,
     defaultCursorMode = resolveCursorMode(),
+    recordOutputPath = null,
+    recordFlags = {},
   } = options;
   let steps;
   const trimmed = String(stepsInput || "").trim();
@@ -2777,236 +2960,298 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
   }
 
   let currentPage = defaultTarget ? await resolvePage(defaultTarget) : null;
+  let recordingTargetId = null;
+  let recordingResult = null;
+  let batchError = null;
+
+  if (recordOutputPath) {
+    const recTarget = currentPage?.targetId || steps.find((s) => s?.target)?.target;
+    if (!recTarget) {
+      throw new Error(
+        "batch --record requires <target> (or a step with \"target\") so recording knows which tab to capture",
+      );
+    }
+    const recStarted = await startPageRecording(recTarget, recordOutputPath, recordFlags);
+    recordingTargetId = recStarted.targetId;
+    if (!currentPage) {
+      currentPage = await resolvePage(recordingTargetId);
+    }
+  }
+
+  const effectiveDefaultCursorMode =
+    recordOutputPath &&
+    !recordFlags["no-cursor"] &&
+    recordFlags.cursor === undefined &&
+    process.env.CDP_CURSOR === undefined
+      ? "demo"
+      : defaultCursorMode;
+
+  const resolveStepCursor = (step) =>
+    step.cursor
+      ? resolveCursorMode({ cursor: step.cursor })
+      : recordOutputPath
+        ? effectiveDefaultCursorMode
+        : resolvePageCursorMode(recordFlags, currentPage);
+
   const results = [];
 
-  for (let i = 0; i < steps.length; i += 1) {
-    const step = steps[i] || {};
-    const cmd = String(step.cmd || step.action || step.type || "").toLowerCase();
-    const stepTimeout = step.timeoutMs || step.timeout || defaultTimeoutMs;
+  try {
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i] || {};
+      const cmd = String(step.cmd || step.action || step.type || "").toLowerCase();
+      const stepTimeout = step.timeoutMs || step.timeout || defaultTimeoutMs;
 
-    try {
-      if (step.target) {
-        currentPage = await resolvePage(String(step.target));
-      }
-      if (cmd === "sleep") {
-        const ms = Number(step.ms ?? step.durationMs ?? 200);
-        await sleep(ms);
-        results.push({ index: i, cmd, ok: true, sleptMs: ms });
-        continue;
-      }
-      if (cmd === "open") {
-        const created = await requestBridge({
-          id: 1,
-          method: "Target.createTarget",
-          params: { url: step.url },
-        });
-        await sleep(800);
-        currentPage = await resolvePage(created.targetId);
-        await ensurePageMonitor(currentPage, true);
-        results.push({ index: i, cmd, ok: true, targetId: currentPage.targetId, url: currentPage.url });
-        continue;
-      }
+      try {
+        if (step.target) {
+          currentPage = await resolvePage(String(step.target));
+        }
+        if (cmd === "sleep") {
+          const ms = Number(step.ms ?? step.durationMs ?? 200);
+          await sleep(ms);
+          results.push({ index: i, cmd, ok: true, sleptMs: ms });
+          continue;
+        }
+        if (cmd === "open") {
+          const created = await requestBridge({
+            id: 1,
+            method: "Target.createTarget",
+            params: { url: step.url },
+          });
+          await sleep(800);
+          currentPage = await resolvePage(created.targetId);
+          await ensurePageMonitor(currentPage, true);
+          results.push({ index: i, cmd, ok: true, targetId: currentPage.targetId, url: currentPage.url });
+          continue;
+        }
 
-      if (!currentPage) {
-        throw new Error(`Step ${i} (${cmd}) requires a target (pass <target> to batch or "target" on step)`);
-      }
+        if (!currentPage) {
+          throw new Error(`Step ${i} (${cmd}) requires a target (pass <target> to batch or "target" on step)`);
+        }
 
-      let stepRes;
-      if (cmd === "eval" || cmd === "page-eval") {
-        const ev = await evaluateInPage(
-          currentPage,
-          step.expr ?? step.expression,
-          { awaitPromise: step.awaitPromise !== false, timeoutMs: stepTimeout },
-        );
-        stepRes = { value: ev.evaluation?.value, exceptionDetails: ev.exceptionDetails };
-      } else if (cmd === "click" || cmd === "page-click") {
-        const ck = await clickInPage(
-          currentPage,
-          step.selector ?? step.text ?? step.query,
-          {
+        let stepRes;
+        if (cmd === "eval" || cmd === "page-eval") {
+          const ev = await evaluateInPage(
+            currentPage,
+            step.expr ?? step.expression,
+            { awaitPromise: step.awaitPromise !== false, timeoutMs: stepTimeout },
+          );
+          stepRes = { value: ev.evaluation?.value, exceptionDetails: ev.exceptionDetails };
+        } else if (cmd === "click" || cmd === "page-click") {
+          const ck = await clickInPage(
+            currentPage,
+            step.selector ?? step.text ?? step.query,
+            {
+              byText: Boolean(step.byText || (step.text && !step.selector)),
+              exact: Boolean(step.exact),
+              index: step.index ?? 0,
+              waitMs: step.waitMs ?? step.wait ?? 0,
+              waitFor: step.waitFor ?? null,
+              nativeMouse: Boolean(step.native),
+              cursorMode: resolveStepCursor(step),
+              timeoutMs: stepTimeout,
+            },
+          );
+          const { page: _p, ...rest } = ck;
+          stepRes = rest;
+        } else if (cmd === "hover" || cmd === "page-hover" || cmd === "move") {
+          const hv = await hoverInPage(
+            currentPage,
+            step.selector ?? step.coords ?? step.text ?? `${step.x},${step.y}`,
+            {
+              byText: Boolean(step.byText || (step.text && !step.selector)),
+              exact: Boolean(step.exact),
+              index: step.index ?? 0,
+              persist: step.persist !== false,
+              nativeMouse: Boolean(step.native),
+              cursorMode: resolveStepCursor(step),
+              timeoutMs: stepTimeout,
+            },
+          );
+          const { page: _p, ...rest } = hv;
+          stepRes = rest;
+        } else if (
+          cmd === "scroll" ||
+          cmd === "page-scroll" ||
+          cmd === "wheel" ||
+          cmd === "page-wheel"
+        ) {
+          const sc = await scrollInPage(currentPage, {
+            targetSpec:
+              step.selector ??
+              step.coords ??
+              (step.x !== undefined && step.y !== undefined
+                ? `${step.x},${step.y}`
+                : step.text ?? null),
+            direction: step.direction ?? step.to ?? null,
+            amount: step.amount ?? step.distance,
+            dx: step.dx ?? step.deltaX,
+            dy: step.dy ?? step.deltaY,
             byText: Boolean(step.byText || (step.text && !step.selector)),
             exact: Boolean(step.exact),
             index: step.index ?? 0,
-            waitMs: step.waitMs ?? step.wait ?? 0,
-            waitFor: step.waitFor ?? null,
-            nativeMouse: Boolean(step.native),
-            cursorMode: step.cursor ? resolveCursorMode({ cursor: step.cursor }) : defaultCursorMode,
+            steps: step.steps,
+            waitMs: step.waitMs ?? step.wait,
+            nativeWheel: step.jsScroll ? false : step.native !== false,
+            cursorMode: resolveStepCursor(step),
             timeoutMs: stepTimeout,
-          },
-        );
-        const { page: _p, ...rest } = ck;
-        stepRes = rest;
-      } else if (cmd === "hover" || cmd === "page-hover" || cmd === "move") {
-        const hv = await hoverInPage(
-          currentPage,
-          step.selector ?? step.coords ?? step.text ?? `${step.x},${step.y}`,
-          {
-            byText: Boolean(step.byText || (step.text && !step.selector)),
-            exact: Boolean(step.exact),
-            index: step.index ?? 0,
-            persist: step.persist !== false,
-            nativeMouse: Boolean(step.native),
-            cursorMode: step.cursor ? resolveCursorMode({ cursor: step.cursor }) : defaultCursorMode,
+          });
+          const { page: _p, ...rest } = sc;
+          stepRes = rest;
+        } else if (cmd === "fill" || cmd === "page-fill" || cmd === "type" || cmd === "page-type") {
+          const fl = await fillInPage(currentPage, step.selector, step.text ?? step.value ?? "", {
+            clear: Boolean(step.clear),
+            append: Boolean(step.append),
+            submit: Boolean(step.submit),
+            submitSelector: step.submitSelector ?? null,
+            cursorMode: resolveStepCursor(step),
             timeoutMs: stepTimeout,
-          },
-        );
-        const { page: _p, ...rest } = hv;
-        stepRes = rest;
-      } else if (
-        cmd === "scroll" ||
-        cmd === "page-scroll" ||
-        cmd === "wheel" ||
-        cmd === "page-wheel"
-      ) {
-        const sc = await scrollInPage(currentPage, {
-          targetSpec:
-            step.selector ??
-            step.coords ??
-            (step.x !== undefined && step.y !== undefined
-              ? `${step.x},${step.y}`
-              : step.text ?? null),
-          direction: step.direction ?? step.to ?? null,
-          amount: step.amount ?? step.distance,
-          dx: step.dx ?? step.deltaX,
-          dy: step.dy ?? step.deltaY,
-          byText: Boolean(step.byText || (step.text && !step.selector)),
-          exact: Boolean(step.exact),
-          index: step.index ?? 0,
-          steps: step.steps,
-          waitMs: step.waitMs ?? step.wait,
-          nativeWheel: step.jsScroll ? false : step.native !== false,
-          cursorMode: step.cursor
-            ? resolveCursorMode({ cursor: step.cursor })
-            : defaultCursorMode,
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = sc;
-        stepRes = rest;
-      } else if (cmd === "fill" || cmd === "page-fill" || cmd === "type" || cmd === "page-type") {
-        const fl = await fillInPage(currentPage, step.selector, step.text ?? step.value ?? "", {
-          clear: Boolean(step.clear),
-          append: Boolean(step.append),
-          submit: Boolean(step.submit),
-          submitSelector: step.submitSelector ?? null,
-          cursorMode: step.cursor ? resolveCursorMode({ cursor: step.cursor }) : defaultCursorMode,
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = fl;
-        stepRes = rest;
-      } else if (cmd === "wait" || cmd === "page-wait") {
-        const wt = await waitOnPage(
-          currentPage,
-          step.selector ?? step.expr ?? "",
-          { timeoutMs: stepTimeout, expectedText: step.text },
-        );
-        const { page: _p, ...rest } = wt;
-        stepRes = rest;
-      } else if (cmd === "text" || cmd === "page-text") {
-        const tx = await readPageText(
-          currentPage,
-          step.selector,
-          step.maxLength ?? 50_000,
-          stepTimeout,
-        );
-        const { page: _p, ...rest } = tx;
-        stepRes = rest;
-      } else if (cmd === "elements" || cmd === "page-elements" || cmd === "snapshot") {
-        const elRes = await inspectPageElements(currentPage, {
-          rootSelector: step.selector ?? step.root ?? null,
-          includeHidden: Boolean(step.all),
-          limit: step.limit ?? 80,
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = elRes;
-        stepRes = rest;
-      } else if (cmd === "screenshot" || cmd === "page-screenshot" || cmd === "shot") {
-        const sh = await capturePageScreenshot(
-          currentPage,
-          step.path ?? step.outPath,
-          step,
-          stepTimeout,
-        );
-        const { page: _p, ...rest } = sh;
-        stepRes = rest;
-      } else if (cmd === "navigate" || cmd === "page-navigate" || cmd === "goto" || cmd === "nav") {
-        const nv = await navigatePage(currentPage, step.url, {
-          waitMs: step.waitMs ?? 1_200,
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = nv;
-        stepRes = rest;
-      } else if (cmd === "reload" || cmd === "page-reload") {
-        const rl = await reloadPage(currentPage, {
-          ignoreCache: Boolean(step.ignoreCache || step.hard),
-          waitMs: step.waitMs ?? 600,
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = rl;
-        stepRes = rest;
-      } else if (cmd === "focus" || cmd === "activate") {
-        const fc = await focusPage(currentPage, stepTimeout);
-        const { page: _p, ...rest } = fc;
-        stepRes = rest;
-      } else if (cmd === "logs" || cmd === "page-logs") {
-        const lg = await collectPageLogs(currentPage, {
-          includeAll: Boolean(step.all),
-          levelFilter: step.level,
-          grepPattern: step.grep,
-          limit: step.limit ?? 50,
-          clear: Boolean(step.clear),
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = lg;
-        stepRes = rest;
-      } else if (cmd === "network" || cmd === "page-network") {
-        const nw = await collectPageNetwork(currentPage, {
-          includeAll: Boolean(step.all),
-          includeResources: Boolean(step.resources),
-          urlPattern: step.url,
-          methodFilter: step.method,
-          typeFilter: step.requestType,
-          statusFilter: step.status,
-          limit: step.limit ?? 50,
-          clear: Boolean(step.clear),
-          timeoutMs: stepTimeout,
-        });
-        const { page: _p, ...rest } = nw;
-        stepRes = rest;
-      } else if (cmd === "call" || cmd === "send" || cmd === "raw") {
-        stepRes = await callPage(
-          currentPage,
-          step.method,
-          step.params || {},
-          stepTimeout,
-        );
-      } else {
-        throw new Error(`Unknown batch step cmd: "${cmd}"`);
-      }
+          });
+          const { page: _p, ...rest } = fl;
+          stepRes = rest;
+        } else if (cmd === "wait" || cmd === "page-wait") {
+          const wt = await waitOnPage(
+            currentPage,
+            step.selector ?? step.expr ?? "",
+            { timeoutMs: stepTimeout, expectedText: step.text },
+          );
+          const { page: _p, ...rest } = wt;
+          stepRes = rest;
+        } else if (cmd === "text" || cmd === "page-text") {
+          const tx = await readPageText(
+            currentPage,
+            step.selector,
+            step.maxLength ?? 50_000,
+            stepTimeout,
+          );
+          const { page: _p, ...rest } = tx;
+          stepRes = rest;
+        } else if (cmd === "elements" || cmd === "page-elements" || cmd === "snapshot") {
+          const elRes = await inspectPageElements(currentPage, {
+            rootSelector: step.selector ?? step.root ?? null,
+            includeHidden: Boolean(step.all),
+            limit: step.limit ?? 80,
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = elRes;
+          stepRes = rest;
+        } else if (cmd === "screenshot" || cmd === "page-screenshot" || cmd === "shot") {
+          const sh = await capturePageScreenshot(
+            currentPage,
+            step.path ?? step.outPath,
+            step,
+            stepTimeout,
+          );
+          const { page: _p, ...rest } = sh;
+          stepRes = rest;
+        } else if (cmd === "navigate" || cmd === "page-navigate" || cmd === "goto" || cmd === "nav") {
+          const nv = await navigatePage(currentPage, step.url, {
+            waitMs: step.waitMs ?? 1_200,
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = nv;
+          stepRes = rest;
+        } else if (cmd === "reload" || cmd === "page-reload") {
+          const rl = await reloadPage(currentPage, {
+            ignoreCache: Boolean(step.ignoreCache || step.hard),
+            waitMs: step.waitMs ?? 600,
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = rl;
+          stepRes = rest;
+        } else if (cmd === "focus" || cmd === "activate") {
+          const fc = await focusPage(currentPage, stepTimeout);
+          const { page: _p, ...rest } = fc;
+          stepRes = rest;
+        } else if (cmd === "logs" || cmd === "page-logs") {
+          const lg = await collectPageLogs(currentPage, {
+            includeAll: Boolean(step.all),
+            levelFilter: step.level,
+            grepPattern: step.grep,
+            limit: step.limit ?? 50,
+            clear: Boolean(step.clear),
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = lg;
+          stepRes = rest;
+        } else if (cmd === "network" || cmd === "page-network") {
+          const nw = await collectPageNetwork(currentPage, {
+            includeAll: Boolean(step.all),
+            includeResources: Boolean(step.resources),
+            urlPattern: step.url,
+            methodFilter: step.method,
+            typeFilter: step.requestType,
+            statusFilter: step.status,
+            limit: step.limit ?? 50,
+            clear: Boolean(step.clear),
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = nw;
+          stepRes = rest;
+        } else if (cmd === "call" || cmd === "send" || cmd === "raw") {
+          stepRes = await callPage(
+            currentPage,
+            step.method,
+            step.params || {},
+            stepTimeout,
+          );
+        } else {
+          throw new Error(`Unknown batch step cmd: "${cmd}"`);
+        }
 
-      results.push({ index: i, cmd, ok: true, ...stepRes });
-    } catch (error) {
-      results.push({ index: i, cmd, ok: false, error: error.message });
-      if (!continueOnError) {
-        const batchErr = new Error(
-          `Batch failed at step ${i} (${cmd}): ${error.message}`,
+        results.push({ index: i, cmd, ok: true, ...stepRes });
+      } catch (error) {
+        results.push({ index: i, cmd, ok: false, error: error.message });
+        if (!continueOnError) {
+          const batchErr = new Error(
+            `Batch failed at step ${i} (${cmd}): ${error.message}`,
+          );
+          batchErr.partialResults = {
+            page: currentPage,
+            completedSteps: i,
+            totalSteps: steps.length,
+            results,
+          };
+          throw batchErr;
+        }
+      }
+    }
+  } catch (outerErr) {
+    batchError = outerErr;
+  } finally {
+    if (recordingTargetId) {
+      try {
+        recordingResult = await stopAndFinalizeRecording(
+          recordingTargetId,
+          recordOutputPath,
+          recordFlags,
         );
-        batchErr.partialResults = {
-          page: currentPage,
-          completedSteps: i,
-          totalSteps: steps.length,
-          results,
-        };
-        throw batchErr;
+      } catch (recStopErr) {
+        if (!batchError) {
+          batchError = recStopErr;
+        } else {
+          recordingResult = { error: recStopErr.message };
+        }
       }
     }
   }
 
-  return {
+  if (batchError) {
+    if (batchError.partialResults && recordingResult) {
+      batchError.partialResults.recording = recordingResult;
+    }
+    throw batchError;
+  }
+
+  const out = {
     page: currentPage,
     completedSteps: results.length,
     totalSteps: steps.length,
     results,
   };
+  if (recordingResult) {
+    out.recording = recordingResult;
+  }
+  return out;
 }
 
 async function main() {
@@ -3052,6 +3297,9 @@ async function main() {
       saveClientSessions({});
     }
     const forwardArgs = [...restArgs];
+    if (globalFlags.socket && !forwardArgs.includes("--socket")) {
+      forwardArgs.push("--socket", String(globalFlags.socket));
+    }
     if (globalFlags.timeout && !forwardArgs.includes("--timeout") && !forwardArgs.includes("--wait-ms")) {
       forwardArgs.push("--timeout", String(globalFlags.timeout));
     }
@@ -3370,6 +3618,150 @@ async function main() {
   }
 
   if (
+    command === "page-record" ||
+    command === "record" ||
+    command === "screencast"
+  ) {
+    const { flags, positional } = parseFlags(
+      restArgs,
+      ["no-focus"],
+      globalFlags,
+    );
+    const looksLikeVideoPath = (val) =>
+      typeof val === "string" &&
+      (/\.(webm|mp4|gif|mkv|mov|avi)$/i.test(val) ||
+        val.startsWith("./") ||
+        val.startsWith("../") ||
+        val.startsWith(".\\") ||
+        val.startsWith("..\\"));
+
+    const firstToken = String(positional[0] || "").toLowerCase();
+    const knownSubcmds = new Set([
+      "start",
+      "stop",
+      "status",
+      "list",
+      "cancel",
+      "abort",
+      "clip",
+    ]);
+    const subcmd = knownSubcmds.has(firstToken)
+      ? firstToken
+      : flags.duration !== undefined
+        ? "clip"
+        : "";
+    const subPositional = knownSubcmds.has(firstToken)
+      ? positional.slice(1)
+      : positional;
+
+    if (subcmd === "status" || subcmd === "list") {
+      const data = await requestBridge(
+        { id: 1, method: "bridge.record.status", params: {} },
+        resolveTimeoutMs(flags, 10_000),
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "cancel" || subcmd === "abort") {
+      const { targetQuery } = takeTargetArg(subPositional, flags);
+      const data = await requestBridge(
+        {
+          id: 1,
+          method: "bridge.record.cancel",
+          params: targetQuery ? { targetId: targetQuery } : {},
+        },
+        resolveTimeoutMs(flags, 10_000),
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "start") {
+      const { targetQuery, restPositional } = takeTargetArg(subPositional, flags);
+      if (!targetQuery) {
+        throw new Error(
+          "Usage: cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--max-width <px>] [--max-height <px>] [--max-duration <ms>] [--no-focus]",
+        );
+      }
+      const outPathArg =
+        restPositional[0] ||
+        (typeof flags.output === "string" ? flags.output : undefined);
+      const data = await startPageRecording(targetQuery, outPathArg, flags);
+      diagTelemetry.targetQuery = targetQuery;
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "stop") {
+      let targetQuery =
+        typeof flags.target === "string" ? flags.target : undefined;
+      let outPathArg =
+        typeof flags.output === "string" ? flags.output : undefined;
+
+      if (!targetQuery && subPositional.length === 1) {
+        if (looksLikeVideoPath(subPositional[0])) {
+          outPathArg = outPathArg || subPositional[0];
+        } else {
+          targetQuery = subPositional[0];
+        }
+      } else if (!targetQuery && subPositional.length >= 2) {
+        targetQuery = subPositional[0];
+        outPathArg = outPathArg || subPositional[1];
+      } else if (targetQuery && subPositional.length >= 1) {
+        outPathArg = outPathArg || subPositional[0];
+      }
+
+      if (targetQuery) {
+        diagTelemetry.targetQuery = targetQuery;
+      }
+      const data = await stopAndFinalizeRecording(targetQuery, outPathArg, flags);
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "clip") {
+      const { targetQuery, restPositional } = takeTargetArg(subPositional, flags);
+      const durationMs =
+        flags.duration !== undefined ? Number(flags.duration) : 5_000;
+      if (!targetQuery || !Number.isFinite(durationMs) || durationMs <= 0) {
+        throw new Error(
+          "Usage: cdp record <target> [output.webm] --duration <ms> [--fps <n>] [--quality <n>]",
+        );
+      }
+      const outPathArg =
+        restPositional[0] ||
+        (typeof flags.output === "string" ? flags.output : undefined);
+      diagTelemetry.targetQuery = targetQuery;
+      const started = await startPageRecording(targetQuery, outPathArg, {
+        ...flags,
+        "max-duration": Math.max(durationMs + 30_000, 60_000),
+      });
+      try {
+        await sleep(durationMs);
+      } catch (err) {
+        await requestBridge({
+          id: 1,
+          method: "bridge.record.cancel",
+          params: { targetId: started.targetId },
+        }).catch(() => {});
+        throw err;
+      }
+      const data = await stopAndFinalizeRecording(
+        started.targetId,
+        outPathArg || started.outputPath,
+        flags,
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
+    throw new Error(
+      "Usage:\n" +
+        "  cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--max-width <px>] [--max-height <px>] [--no-focus]\n" +
+        "  cdp record stop [target] [output.webm] [--fps <n>] [--bitrate <bps>] [--keep-frames <dir>]\n" +
+        "  cdp record status\n" +
+        "  cdp record cancel [target]\n" +
+        "  cdp record <target> [output.webm] --duration <ms>",
+    );
+  }
+
+  if (
     command === "page-fill" ||
     command === "fill" ||
     command === "page-type" ||
@@ -3397,7 +3789,7 @@ async function main() {
         typeof flags["submit-selector"] === "string"
           ? flags["submit-selector"]
           : null,
-      cursorMode: resolveCursorMode(flags),
+      cursorMode: resolvePageCursorMode(flags, page),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
     });
     return { outputMode: formatMode(flags), data };
@@ -3426,7 +3818,7 @@ async function main() {
         typeof flags["wait-for"] === "string" ? flags["wait-for"] : null,
       includeHidden: Boolean(flags["include-hidden"]),
       nativeMouse: Boolean(flags.native),
-      cursorMode: resolveCursorMode(flags),
+      cursorMode: resolvePageCursorMode(flags, page),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
     });
     return { outputMode: formatMode(flags), data };
@@ -3452,7 +3844,7 @@ async function main() {
       index: flags.index !== undefined ? Number(flags.index) : 0,
       persist: !flags["auto-hide"],
       nativeMouse: Boolean(flags.native),
-      cursorMode: resolveCursorMode(flags),
+      cursorMode: resolvePageCursorMode(flags, page),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
     });
     return { outputMode: formatMode(flags), data };
@@ -3479,7 +3871,7 @@ async function main() {
     const page = await resolvePage(targetQuery);
     const data = await scrollInPage(page, {
       ...parsedScroll,
-      cursorMode: resolveCursorMode(flags),
+      cursorMode: resolvePageCursorMode(flags, page),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
     });
     return { outputMode: formatMode(flags), data };
@@ -3622,7 +4014,7 @@ async function main() {
   if (command === "batch") {
     const { flags, positional } = parseFlags(
       restArgs,
-      ["stdin", "continue-on-error"],
+      ["stdin", "continue-on-error", "no-focus"],
       globalFlags,
     );
     let defaultTarget =
@@ -3640,11 +4032,19 @@ async function main() {
     } else {
       stepsArg = positional[0];
     }
+    const recordOutputPath =
+      typeof flags.record === "string"
+        ? flags.record
+        : flags.record === true
+          ? `cdp-batch-${Date.now()}.webm`
+          : null;
     const stepsInput = readInputSource(stepsArg, flags, "batch steps JSON");
     const data = await runBatchSteps(defaultTarget, stepsInput, {
       continueOnError: Boolean(flags["continue-on-error"]),
       defaultTimeoutMs: resolveTimeoutMs(flags, 15_000),
       defaultCursorMode: resolveCursorMode(flags),
+      recordOutputPath,
+      recordFlags: flags,
     });
     return { outputMode: formatMode(flags), data };
   }
