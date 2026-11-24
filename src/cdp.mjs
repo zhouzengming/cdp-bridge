@@ -83,7 +83,16 @@ function getSocketState() {
       ? `\\\\.\\pipe\\cdp-bridge-${getUid()}`
       : path.join(runtimeDir, "bridge.sock"));
   const isNamedPipe = isWindows && /^\\\\[.?]\\pipe\\/i.test(socketPath);
-  const stateBaseDir = isNamedPipe ? runtimeDir : path.dirname(socketPath);
+  const stateBaseDir = isNamedPipe
+    ? (process.env.CDP_BRIDGE_STATE_DIR
+        ? path.resolve(process.env.CDP_BRIDGE_STATE_DIR)
+        : (() => {
+            const rawLeaf = String(socketPath || "")
+              .replace(/^\\\\[.?]\\pipe\\/i, "")
+              .replace(/[^a-zA-Z0-9._-]/g, "_");
+            return rawLeaf ? path.join(os.tmpdir(), rawLeaf) : runtimeDir;
+          })())
+    : path.dirname(socketPath);
   const clientSessionsPath = path.join(stateBaseDir, "client-sessions.json");
   const activeRecordingsPath = path.join(
     stateBaseDir,

@@ -168,13 +168,25 @@ function resolveSocketPath(runtimeDir) {
 const runtimeDir = runtimeDirectory();
 const socketPath = resolveSocketPath(runtimeDir);
 const isNamedPipe = isWindows && /^\\\\[.?]\\pipe\\/i.test(socketPath);
-const stateDir = isNamedPipe ? runtimeDir : path.dirname(socketPath);
+function resolveNamedPipeStateDir(pipePath, fallbackDir) {
+  if (process.env.CDP_BRIDGE_STATE_DIR) {
+    return path.resolve(process.env.CDP_BRIDGE_STATE_DIR);
+  }
+  const rawLeaf = String(pipePath || "")
+    .replace(/^\\\\[.?]\\pipe\\/i, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+  return rawLeaf ? path.join(os.tmpdir(), rawLeaf) : fallbackDir;
+}
+
+const stateDir = isNamedPipe
+  ? resolveNamedPipeStateDir(socketPath, runtimeDir)
+  : path.dirname(socketPath);
 const pidPath = isNamedPipe
-  ? path.join(runtimeDir, "bridge.pid")
+  ? path.join(stateDir, "bridge.pid")
   : `${socketPath}.pid`;
 const logPath = isNamedPipe
-  ? path.join(runtimeDir, "bridge.log")
-  : `${socketPath}.log`;
+  ? connArgs.logFile || path.join(stateDir, "bridge.log")
+  : connArgs.logFile || `${socketPath}.log`;
 
 function findDevToolsActivePortCandidates() {
   const candidates = [];

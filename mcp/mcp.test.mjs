@@ -97,7 +97,10 @@ test("antigravity-mcp plugin files stay in sync with root version, skill, and gu
 
 test("MCP server speaks both NDJSON and Content-Length framing and forwards UTF-8 multi-line payloads to bridge socket", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cdp-mcp-test-"));
-  const sockPath = path.join(tmpDir, "bridge.sock");
+  const sockPath =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\cdp-mcp-test-${process.pid}-${Date.now()}`
+      : path.join(tmpDir, "bridge.sock");
   let lastEvalExpr = "";
 
   const mockBridge = net.createServer((conn) => {
@@ -149,7 +152,12 @@ test("MCP server speaks both NDJSON and Content-Length framing and forwards UTF-
   try {
     // 1) Test standard newline-delimited MCP stdio
     const child = spawn(process.execPath, [serverScript, "--socket", sockPath], {
-      env: { ...process.env, CDP_DIAG: "0", CDP_NO_AUTO_START: "1" },
+      env: {
+        ...process.env,
+        CDP_BRIDGE_STATE_DIR: tmpDir,
+        CDP_DIAG: "0",
+        CDP_NO_AUTO_START: "1",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -216,7 +224,12 @@ test("MCP server speaks both NDJSON and Content-Length framing and forwards UTF-
 
     // 2) Test Content-Length header framing compatibility
     const clChild = spawn(process.execPath, [serverScript, "--socket", sockPath], {
-      env: { ...process.env, CDP_DIAG: "0", CDP_NO_AUTO_START: "1" },
+      env: {
+        ...process.env,
+        CDP_BRIDGE_STATE_DIR: tmpDir,
+        CDP_DIAG: "0",
+        CDP_NO_AUTO_START: "1",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
 
