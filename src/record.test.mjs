@@ -13,7 +13,12 @@ import {
   hasFfmpeg,
   resolveRecordingOutputPath,
 } from "./recorder.mjs";
-import { inspectWebmBuffer, muxWebm } from "./webm-muxer.mjs";
+import {
+  concatWebmBuffers,
+  demuxWebm,
+  inspectWebmBuffer,
+  muxWebm,
+} from "./webm-muxer.mjs";
 
 const srcDir = path.dirname(fileURLToPath(import.meta.url));
 const cdpScript = path.join(srcDir, "cdp.mjs");
@@ -206,6 +211,45 @@ test("muxWebm encodes valid EBML VINT sizes (including 0x7f boundary), multi-Clu
     webm.includes(Buffer.from([0xa3, 0x40, 0x7f, 0x81])),
     "127-byte SimpleBlock payload must encode size as 2-byte VINT 0x407f",
   );
+
+  // Round-trip demuxWebm and lossless concatWebmBuffers
+  const demuxed = demuxWebm(webm);
+  assert.equal(demuxed.width, 1280);
+  assert.equal(demuxed.height, 720);
+  assert.equal(demuxed.codecId, "V_VP9");
+  assert.equal(demuxed.chunks.length, chunks.length);
+  assert.deepEqual(demuxed.chunks[1].data, chunks[1].data);
+
+  const seg2 = muxWebm({
+    width: 1280,
+    height: 720,
+    durationMs: 1_500,
+    codecId: "V_VP9",
+    chunks: [
+      { data: Buffer.alloc(180, 0x66), timestampMs: 0, keyframe: true },
+      { data: Buffer.alloc(90, 0x77), timestampMs: 500, keyframe: false },
+    ],
+  });
+  const merged = concatWebmBuffers([webm, seg2]);
+  assert.equal(merged.segmentCount, 2);
+  assert.equal(merged.totalChunks, chunks.length + 2);
+  assert.equal(inspectWebmBuffer(merged.buffer).valid, true);
+  const mergedDemux = demuxWebm(merged.buffer);
+  assert.equal(mergedDemux.chunks.length, chunks.length + 2);
+  assert.equal(mergedDemux.chunks[chunks.length].keyframe, true);
+  assert.ok(mergedDemux.chunks[chunks.length].timestampMs > chunks[chunks.length - 1].timestampMs);
+
+  const mismatchSeg = muxWebm({
+    width: 800,
+    height: 600,
+    durationMs: 500,
+    codecId: "V_VP9",
+    chunks: [{ data: Buffer.alloc(64, 0x88), timestampMs: 0, keyframe: true }],
+  });
+  assert.throws(
+    () => concatWebmBuffers([webm, mismatchSeg]),
+    /Resolution or codec mismatch/,
+  );
 });
 
 test("buildNormalizedFramePlan normalizes VFR timestamps and synthesizes final hold frame", () => {
@@ -273,6 +317,7 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
 
   const ackedFrameIds = [];
   const pageExpressions = [];
+  const mouseEvents = [];
   let workerCreated = 0;
   let workerClosed = 0;
   let screencastActive = false;
@@ -354,6 +399,13 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     if (method === "Page.captureScreenshot") {
       return { data: TINY_JPEG_B64 };
     }
+    if (method === "Input.dispatchMouseEvent") {
+      mouseEvents.push(params);
+      return {};
+    }
+    if (method === "Page.addScriptToEvaluateOnNewDocument") {
+      return { identifier: "hud-script-1" };
+    }
     if (method === "Runtime.evaluate") {
       const expr = String(params.expression || "");
 
@@ -393,6 +445,26 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
 
       // Main page evaluations
       pageExpressions.push(expr);
+      if (expr.includes(".startDrag(")) {
+        return {
+          result: {
+            type: "object",
+            value: {
+              ok: true,
+              fromX: 120,
+              fromY: 200,
+              fromTag: "DIV",
+              fromText: "Card A",
+              toX: 420,
+              toY: 260,
+              toRect: { left: 380, top: 230, width: 80, height: 60 },
+              toTag: "DIV",
+              toText: "Done Column",
+              useHtml5: true,
+            },
+          },
+        };
+      }
       if (expr.includes("Scroll ↑ Top")) {
         return {
           result: {
@@ -517,12 +589,36 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     );
     assert.ok(ackedFrameIds.includes(501), "Daemon must send Page.screencastFrameAck");
 
-    // 4) Status check while recording
+    // 4) Pause -> simulated wait -> Resume (verifying HUD toast & time compression)
+    const recPause = await runCli(["record", "pause", "426B5451"]);
+    assert.equal(recPause.status, 0, recPause.stderr);
+    assert.equal(JSON.parse(recPause.stdout).paused, true);
+    assert.ok(
+      pageExpressions.some((e) => e.includes("录制已暂停")),
+      "Pause should show paused HUD toast in page",
+    );
+
+    // While paused, scroll runs in default fast mode (`if (false)`) rather than slow-mo
+    const pausedScroll = await runCli(["scroll", "426B5451", "top"]);
+    assert.equal(pausedScroll.status, 0, pausedScroll.stderr);
+    assert.match(pageExpressions[pageExpressions.length - 1], /if \(false\)/);
+
+    await new Promise((r) => setTimeout(r, 320));
+    const recResume = await runCli(["record", "resume", "426B5451"]);
+    assert.equal(recResume.status, 0, recResume.stderr);
+    const resumeJson = JSON.parse(recResume.stdout);
+    assert.equal(resumeJson.resumed, true);
+    assert.ok(resumeJson.skippedMs >= 260);
+    assert.ok(
+      pageExpressions.some((e) => e.includes("已跳过")),
+      "Resume should display floating skip-wait toast in page",
+    );
+
     const recStatus = await runCli(["record", "status"]);
     assert.equal(recStatus.status, 0, recStatus.stderr);
     const statusJson = JSON.parse(recStatus.stdout);
     assert.equal(statusJson.count, 1);
-    assert.ok(statusJson.recordings[0].capturedFrames >= 2);
+    assert.equal(statusJson.recordings[0].pauseCount, 1);
 
     // 5) Stop recording (passing output path + --keep-frames without repeating targetId)
     const recStop = await runCli([
@@ -537,11 +633,37 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     assert.equal(stopJson.saved, outWebm);
     assert.equal(stopJson.format, "webm");
     assert.equal(stopJson.codec, "vp9");
+    assert.equal(stopJson.pauseCount, 1);
+    assert.ok(stopJson.skippedDurationMs >= 260);
     assert.ok(fs.existsSync(outWebm));
     assert.equal(inspectWebmBuffer(fs.readFileSync(outWebm)).valid, true);
     assert.equal(fs.existsSync(activeRecFile), false, "active-recordings.json cleaned up after stop");
     assert.ok(fs.readdirSync(framesExportDir).some((n) => n.endsWith(".jpg")));
     assert.equal(workerCreated, workerClosed, "Background WebCodecs worker target must be closed");
+
+    // 5b) Test `cdp drag` interpolated mouse + HTML5 DragEvent sequence
+    mouseEvents.length = 0;
+    const dragRes = await runCli([
+      "drag",
+      "426B5451",
+      "120,200",
+      "420,260",
+      "--steps",
+      "5",
+    ]);
+    assert.equal(dragRes.status, 0, dragRes.stderr);
+    const dragJson = JSON.parse(dragRes.stdout);
+    assert.equal(dragJson.ok, true);
+    assert.equal(dragJson.deltaX, 300);
+    assert.equal(dragJson.deltaY, 60);
+    assert.equal(dragJson.steps, 5);
+    assert.equal(dragJson.html5Drag, true);
+    assert.ok(mouseEvents.some((m) => m.type === "mousePressed" && m.buttons === 1));
+    assert.equal(
+      mouseEvents.filter((m) => m.type === "mouseMoved" && m.buttons === 1).length,
+      5,
+    );
+    assert.ok(mouseEvents.some((m) => m.type === "mouseReleased" && m.buttons === 0));
 
     // 6) `cdp batch --record` preserves failure video in `finally` even when a step fails!
     const failedBatchWebm = path.join(tmpDir, "failed-batch.webm");
@@ -582,6 +704,27 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     const mcpData = JSON.parse(mcpRes.content[0].text);
     assert.equal(mcpData.saved, mcpClipWebm);
     assert.equal(inspectWebmBuffer(fs.readFileSync(mcpClipWebm)).valid, true);
+
+    // 8) Multi-video lossless concatenation (`cdp record concat ... --rm --no-badge`)
+    const mergedOut = path.join(tmpDir, "merged-final.webm");
+    const concatRes = await runCli([
+      "record",
+      "concat",
+      outWebm,
+      mcpClipWebm,
+      "-o",
+      mergedOut,
+      "--rm",
+      "--no-badge",
+    ]);
+    assert.equal(concatRes.status, 0, concatRes.stderr);
+    const concatJson = JSON.parse(concatRes.stdout);
+    assert.equal(concatJson.saved, mergedOut);
+    assert.equal(concatJson.segmentCount, 2);
+    assert.equal(concatJson.cleanedInputs, true);
+    assert.equal(fs.existsSync(outWebm), false, "--rm must clean segment 1");
+    assert.equal(fs.existsSync(mcpClipWebm), false, "--rm must clean segment 2");
+    assert.equal(inspectWebmBuffer(fs.readFileSync(mergedOut)).valid, true);
   } finally {
     await runCli(["stop"]);
     await new Promise((resolve) => {

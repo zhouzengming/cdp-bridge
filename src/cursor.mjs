@@ -39,7 +39,11 @@ export function resolveCursorMode(flags = {}) {
 
 export const CURSOR_HELPER_SOURCE = `(() => {
   const SYM = Symbol.for("cdp.bridge.cursor");
-  if (window[SYM] && window[SYM].version === 7) return window[SYM];
+  if (window[SYM] && window[SYM].version === 9) return window[SYM];
+  const prevRecHud =
+    window[SYM] && typeof window[SYM].getRecordingHudState === "function"
+      ? window[SYM].getRecordingHudState()
+      : null;
   if (window[SYM] && typeof window[SYM].destroy === "function") {
     try { window[SYM].destroy(); } catch {}
   }
@@ -51,6 +55,15 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   let cursorEl = null;
   let badgeEl = null;
   let layerEl = null;
+  let hudWrapEl = null;
+  let recPillEl = null;
+  let recDotEl = null;
+  let recTextEl = null;
+  let recTickTimer = null;
+  let recHudState = { state: "off", elapsedBaseMs: 0, stateStartedAtMs: 0, label: "" };
+  let dragTrailEl = null;
+  let dragLineGlowEl = null;
+  let dragLineDashEl = null;
   let pinnedHighlightEl = null;
 
   let flightX = null;
@@ -147,6 +160,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         pinnedHighlightEl.remove();
         pinnedHighlightEl = null;
       }
+      if (recHudState.state !== "off") return;
       if (host && typeof host.hidePopover === "function") {
         try {
           if (!host.matches || host.matches(":popover-open")) {
@@ -243,10 +257,195 @@ export const CURSOR_HELPER_SOURCE = `(() => {
     cursorEl.appendChild(svg);
     cursorEl.appendChild(badgeEl);
     layerEl.appendChild(cursorEl);
+
+    hudWrapEl = document.createElement("div");
+    hudWrapEl.style.cssText = [
+      "position:fixed",
+      "top:12px",
+      "right:14px",
+      "display:flex",
+      "flex-direction:column",
+      "align-items:flex-end",
+      "gap:6px",
+      "pointer-events:none",
+      "user-select:none",
+      "z-index:2147483647"
+    ].join(";");
+
     root.appendChild(layerEl);
+    root.appendChild(hudWrapEl);
     docEl.appendChild(host);
     promoteTopLayer();
     return true;
+  }
+
+  function formatRecClock(totalMs) {
+    const sec = Math.max(0, Math.floor((totalMs || 0) / 1000));
+    const m = String(Math.floor(sec / 60)).padStart(2, "0");
+    const s = String(sec % 60).padStart(2, "0");
+    return m + ":" + s;
+  }
+
+  function renderRecPillText() {
+    if (!recTextEl) return;
+    const liveMs =
+      recHudState.state === "rec"
+        ? recHudState.elapsedBaseMs + Math.max(0, Date.now() - recHudState.stateStartedAtMs)
+        : recHudState.elapsedBaseMs;
+    const prefix = recHudState.state === "paused" ? "PAUSED" : "REC";
+    const mid = recHudState.label ? " · " + recHudState.label + " · " : " ";
+    recTextEl.textContent = prefix + mid + formatRecClock(liveMs);
+  }
+
+  function updateRecordingHud(opts = {}) {
+    const nextState = String(opts.state || "off").toLowerCase();
+    if (recTickTimer) {
+      clearInterval(recTickTimer);
+      recTickTimer = null;
+    }
+    if (nextState === "off") {
+      recHudState = { state: "off", elapsedBaseMs: 0, stateStartedAtMs: 0, label: "" };
+      if (recPillEl) {
+        recPillEl.remove();
+        recPillEl = null;
+        recDotEl = null;
+        recTextEl = null;
+      }
+      if (hudWrapEl) {
+        hudWrapEl.innerHTML = "";
+      }
+      return;
+    }
+
+    if (!ensureMounted() || !hudWrapEl) return;
+    recHudState = {
+      state: nextState === "paused" ? "paused" : "rec",
+      elapsedBaseMs: Math.max(0, Number(opts.elapsedBaseMs) || 0),
+      stateStartedAtMs: Date.now(),
+      label: opts.label ? String(opts.label) : ""
+    };
+
+    if (!recPillEl || !recPillEl.isConnected) {
+      recPillEl = document.createElement("div");
+      recDotEl = document.createElement("span");
+      recTextEl = document.createElement("span");
+      recPillEl.appendChild(recDotEl);
+      recPillEl.appendChild(recTextEl);
+      hudWrapEl.insertBefore(recPillEl, hudWrapEl.firstChild);
+    }
+
+    const isPaused = recHudState.state === "paused";
+    recPillEl.style.cssText = [
+      "display:inline-flex",
+      "align-items:center",
+      "gap:6px",
+      "padding:3px 9px",
+      "border-radius:999px",
+      "background:rgba(15,23,42,0.24)",
+      "backdrop-filter:blur(2px)",
+      "border:1px solid " + (isPaused ? "rgba(251,191,36,0.32)" : "rgba(248,113,113,0.28)"),
+      "box-shadow:0 1px 3px rgba(15,23,42,0.06)",
+      "color:" + (isPaused ? "rgba(254,243,199,0.9)" : "rgba(255,255,255,0.88)"),
+      "text-shadow:0 1px 2px rgba(15,23,42,0.52)",
+      "opacity:0.82",
+      "font:600 11px/15px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+      "letter-spacing:0.03em",
+      "pointer-events:none"
+    ].join(";");
+
+    recDotEl.style.cssText = [
+      "width:6.5px",
+      "height:6.5px",
+      "border-radius:" + (isPaused ? "2px" : "50%"),
+      "background:" + (isPaused ? "rgba(251,191,36,0.76)" : "rgba(239,68,68,0.76)"),
+      "box-shadow:0 0 4px " + (isPaused ? "rgba(251,191,36,0.38)" : "rgba(239,68,68,0.42)"),
+      "flex-shrink:0"
+    ].join(";");
+
+    renderRecPillText();
+    if (!isPaused) {
+      recTickTimer = setInterval(renderRecPillText, 1000);
+    }
+  }
+
+  function spawnRecordingToast(text, durationMs = 2200) {
+    if (!text || !ensureMounted() || !hudWrapEl) return;
+    const toast = document.createElement("div");
+    toast.style.cssText = [
+      "display:inline-flex",
+      "align-items:center",
+      "gap:5px",
+      "padding:3px 10px",
+      "border-radius:999px",
+      "background:rgba(15,23,42,0.26)",
+      "backdrop-filter:blur(2px)",
+      "border:1px solid rgba(56,189,248,0.3)",
+      "box-shadow:0 1px 4px rgba(15,23,42,0.07)",
+      "color:rgba(240,249,255,0.92)",
+      "text-shadow:0 1px 2px rgba(15,23,42,0.52)",
+      "font:600 11px/15px system-ui,-apple-system,sans-serif",
+      "letter-spacing:0.01em",
+      "white-space:nowrap",
+      "pointer-events:none",
+      "will-change:transform,opacity"
+    ].join(";");
+    toast.textContent = String(text);
+    hudWrapEl.appendChild(toast);
+    const totalMs = Math.max(800, Number(durationMs) || 2200);
+    try {
+      const anim = toast.animate(
+        [
+          { transform: "translate3d(0,-4px,0)", opacity: 0 },
+          { transform: "translate3d(0,0,0)", opacity: 0.8, offset: 0.12 },
+          { transform: "translate3d(0,0,0)", opacity: 0.76, offset: 0.8 },
+          { transform: "translate3d(0,-3px,0)", opacity: 0 }
+        ],
+        { duration: totalMs, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" }
+      );
+      anim.onfinish = () => toast.remove();
+    } catch {
+      setTimeout(() => toast.remove(), totalMs);
+    }
+  }
+
+  function createDragTrailSvg(fromX, fromY, toX, toY) {
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", "100%");
+    svg.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;overflow:visible;";
+
+    const originDot = document.createElementNS(svgNS, "circle");
+    originDot.setAttribute("cx", String(fromX));
+    originDot.setAttribute("cy", String(fromY));
+    originDot.setAttribute("r", "4.5");
+    originDot.setAttribute("fill", "rgba(99,102,241,0.42)");
+    originDot.setAttribute("stroke", "rgba(255,255,255,0.72)");
+    originDot.setAttribute("stroke-width", "1.5");
+
+    const glowLine = document.createElementNS(svgNS, "line");
+    glowLine.setAttribute("x1", String(fromX));
+    glowLine.setAttribute("y1", String(fromY));
+    glowLine.setAttribute("x2", String(toX));
+    glowLine.setAttribute("y2", String(toY));
+    glowLine.setAttribute("stroke", "rgba(255,255,255,0.38)");
+    glowLine.setAttribute("stroke-width", "3.6");
+    glowLine.setAttribute("stroke-linecap", "round");
+
+    const dashLine = document.createElementNS(svgNS, "line");
+    dashLine.setAttribute("x1", String(fromX));
+    dashLine.setAttribute("y1", String(fromY));
+    dashLine.setAttribute("x2", String(toX));
+    dashLine.setAttribute("y2", String(toY));
+    dashLine.setAttribute("stroke", "rgba(99,102,241,0.72)");
+    dashLine.setAttribute("stroke-width", "2");
+    dashLine.setAttribute("stroke-dasharray", "6 4");
+    dashLine.setAttribute("stroke-linecap", "round");
+
+    svg.appendChild(glowLine);
+    svg.appendChild(dashLine);
+    svg.appendChild(originDot);
+    return { svg, glowLine, dashLine };
   }
 
   function promoteTopLayer() {
@@ -546,11 +745,12 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   }
 
   const api = {
-    version: 7,
+    version: 9,
     destroy() {
       unbindUserTakeoverListeners();
       if (idleTimer) clearTimeout(idleTimer);
       if (hideLayerTimer) clearTimeout(hideLayerTimer);
+      if (recTickTimer) clearInterval(recTickTimer);
       if (host) {
         try { host.remove(); } catch {}
         host = null;
@@ -560,6 +760,122 @@ export const CURSOR_HELPER_SOURCE = `(() => {
       if (host && host.isConnected && !suspended) {
         promoteTopLayer();
       }
+    },
+    setRecordingHud(opts) {
+      updateRecordingHud(opts || {});
+    },
+    clearRecordingHud() {
+      updateRecordingHud({ state: "off" });
+    },
+    showRecordingToast(text, durationMs = 2200) {
+      spawnRecordingToast(text, durationMs);
+    },
+    getRecordingHudState() {
+      if (recHudState.state === "off") return null;
+      const liveMs =
+        recHudState.state === "rec"
+          ? recHudState.elapsedBaseMs + Math.max(0, Date.now() - recHudState.stateStartedAtMs)
+          : recHudState.elapsedBaseMs;
+      return {
+        state: recHudState.state,
+        elapsedBaseMs: liveMs,
+        label: recHudState.label
+      };
+    },
+    startDrag(fromX, fromY, fromRect = null, flightMs = 120, guardMs = 1500) {
+      if (!ensureMounted() || suspended) return;
+      extendSimGuard(guardMs + flightMs);
+      const cleanRect = fromRect
+        ? { left: fromRect.left, top: fromRect.top, width: fromRect.width, height: fromRect.height }
+        : null;
+      if (dragTrailEl) {
+        try { dragTrailEl.remove(); } catch {}
+        dragTrailEl = null;
+      }
+      moveCursor(fromX, fromY, "Drag", "rgba(79,70,229,0.92)", flightMs, true);
+      spawnRipple(fromX, fromY, "rgba(99,102,241,0.52)");
+      if (cleanRect) {
+        spawnHighlightBox(cleanRect, "rgba(99,102,241,0.48)", 460);
+      }
+      const trail = createDragTrailSvg(fromX, fromY, fromX, fromY);
+      dragTrailEl = trail.svg;
+      dragLineGlowEl = trail.glowLine;
+      dragLineDashEl = trail.dashLine;
+      layerEl.insertBefore(dragTrailEl, cursorEl);
+    },
+    stepDrag(curX, curY, fromX, fromY, guardMs = 600) {
+      if (!ensureMounted() || suspended) return;
+      extendSimGuard(guardMs);
+      flightX = curX;
+      flightY = curY;
+      visible = true;
+      if (cursorEl) {
+        try { cursorEl.getAnimations().forEach((a) => a.cancel()); } catch {}
+        cursorEl.style.opacity = "1";
+        cursorEl.style.transform = "translate3d(" + curX + "px," + curY + "px,0) scale(0.9)";
+      }
+      const dist = Math.round(Math.hypot(curX - fromX, curY - fromY));
+      if (badgeEl) {
+        badgeEl.textContent = dist > 0 ? "Drag " + dist + "px" : "Drag";
+        badgeEl.style.background = "rgba(79,70,229,0.92)";
+      }
+      if (dragLineGlowEl && dragLineDashEl) {
+        dragLineGlowEl.setAttribute("x2", String(curX));
+        dragLineGlowEl.setAttribute("y2", String(curY));
+        dragLineDashEl.setAttribute("x2", String(curX));
+        dragLineDashEl.setAttribute("y2", String(curY));
+      }
+    },
+    finishDrag(toX, toY, fromX, fromY, toRect = null, persist = false) {
+      if (!ensureMounted() || suspended) return;
+      extendSimGuard(320);
+      const cleanRect = toRect
+        ? { left: toRect.left, top: toRect.top, width: toRect.width, height: toRect.height }
+        : null;
+      const dist = Math.round(Math.hypot(toX - fromX, toY - fromY));
+      const label = dist > 0 ? "Drag " + dist + "px" : "Drag";
+      lastActionState = {
+        kind: "drag",
+        fromX,
+        fromY,
+        x: toX,
+        y: toY,
+        label,
+        color: "rgba(79,70,229,0.92)",
+        boxColor: "rgba(99,102,241,0.56)",
+        rect: cleanRect,
+        persist
+      };
+      flightX = toX;
+      flightY = toY;
+      if (cursorEl) {
+        try { cursorEl.getAnimations().forEach((a) => a.cancel()); } catch {}
+        cursorEl.style.opacity = "1";
+        cursorEl.style.transform = "translate3d(" + toX + "px," + toY + "px,0) scale(1)";
+      }
+      if (badgeEl) {
+        badgeEl.textContent = label;
+      }
+      spawnRipple(toX, toY, "rgba(99,102,241,0.54)");
+      if (cleanRect) {
+        spawnHighlightBox(cleanRect, "rgba(99,102,241,0.52)", 540);
+      }
+      if (dragTrailEl) {
+        const trailToFade = dragTrailEl;
+        dragTrailEl = null;
+        dragLineGlowEl = null;
+        dragLineDashEl = null;
+        try {
+          const anim = trailToFade.animate(
+            [{ opacity: 0.95 }, { opacity: 0 }],
+            { duration: 540, easing: "ease-out", fill: "forwards" }
+          );
+          anim.onfinish = () => trailToFade.remove();
+        } catch {
+          setTimeout(() => trailToFade.remove(), 540);
+        }
+      }
+      scheduleIdleFade(persist);
     },
     moveForClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false) {
       extendSimGuard(guardMs + flightMs);
@@ -729,7 +1045,20 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         pinnedHighlightEl.style.opacity = "0.9";
         layerEl.insertBefore(pinnedHighlightEl, cursorEl);
       }
-      if (kind === "click" || kind === "hover" || kind === "scroll") {
+      if (kind === "drag" && Number.isFinite(lastActionState.fromX) && Number.isFinite(lastActionState.fromY)) {
+        const staticTrail = createDragTrailSvg(lastActionState.fromX, lastActionState.fromY, x, y).svg;
+        if (pinnedHighlightEl) {
+          const wrap = document.createElement("div");
+          wrap.appendChild(staticTrail);
+          wrap.appendChild(pinnedHighlightEl);
+          pinnedHighlightEl = wrap;
+          layerEl.insertBefore(wrap, cursorEl);
+        } else {
+          pinnedHighlightEl = staticTrail;
+          layerEl.insertBefore(staticTrail, cursorEl);
+        }
+      }
+      if (kind === "click" || kind === "hover" || kind === "scroll" || kind === "drag") {
         // Static crisp ring around pointer locus so static PNG clearly shows click/hover/scroll point
         const isScroll = kind === "scroll";
         const ringSize = isScroll ? 34 : 28;
@@ -816,5 +1145,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   };
 
   window[SYM] = api;
+  if (prevRecHud && prevRecHud.state && prevRecHud.state !== "off") {
+    try { api.setRecordingHud(prevRecHud); } catch {}
+  }
   return api;
 })()`;

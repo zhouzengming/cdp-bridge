@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CURSOR_HELPER_SOURCE, resolveCursorMode } from "./cursor.mjs";
 import { recordCliInvocation, runDiagCommand } from "./diag.mjs";
 import {
+  concatRecordingVideos,
   finalizeRecordingVideo,
   resolveRecordingOutputPath,
 } from "./recorder.mjs";
@@ -104,7 +105,8 @@ function isTargetActivelyRecording(targetId) {
   try {
     if (!fs.existsSync(activeRecordingsPath)) return false;
     const active = JSON.parse(fs.readFileSync(activeRecordingsPath, "utf8"));
-    return Boolean(active && active[targetId]);
+    const entry = active && active[targetId];
+    return Boolean(entry && !entry.paused);
   } catch {
     return false;
   }
@@ -397,6 +399,9 @@ function parseFlags(args, booleanFlags = [], globalDefaults = {}) {
       i += 1;
     } else if (arg === "-f" && i + 1 < args.length) {
       flags.file = args[i + 1];
+      i += 1;
+    } else if (arg === "-o" && i + 1 < args.length) {
+      flags.output = args[i + 1];
       i += 1;
     } else {
       positional.push(arg);
@@ -1670,6 +1675,378 @@ async function hoverInPage(page, targetSpec, options = {}) {
   return { page, ...val };
 }
 
+async function dragInPage(page, options = {}) {
+  const {
+    fromSpec,
+    toSpec = null,
+    dx: explicitDx,
+    dy: explicitDy,
+    byText = false,
+    exact = false,
+    steps: rawSteps,
+    durationMs: rawDurationMs,
+    html5 = undefined,
+    cursorMode = resolveCursorMode(),
+    timeoutMs = 20_000,
+  } = options;
+
+  if (!fromSpec) {
+    throw new Error("drag requires a <from> target (selector, text=..., or x,y)");
+  }
+  const hasOffset = Number.isFinite(explicitDx) || Number.isFinite(explicitDy);
+  if (!toSpec && !hasOffset) {
+    throw new Error(
+      "drag requires either a <to> target (selector, text=..., or x,y) or --dx / --dy pixel offset",
+    );
+  }
+
+  const steps = Math.max(
+    2,
+    Math.min(
+      60,
+      Number.isFinite(rawSteps)
+        ? Math.round(rawSteps)
+        : cursorMode === "demo"
+          ? 16
+          : 10,
+    ),
+  );
+  const durationMs = Math.max(
+    40,
+    Math.min(
+      10_000,
+      Number.isFinite(rawDurationMs)
+        ? Math.round(rawDurationMs)
+        : cursorMode === "demo"
+          ? 360
+          : 130,
+    ),
+  );
+  const persistCursor = cursorMode === "persist";
+
+  const prepExpr = `(async () => {
+    function isVisible(node) {
+      const st = window.getComputedStyle(node);
+      if (st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) return false;
+      const r = node.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+    function clampX(x) {
+      return Math.max(4, Math.min(Math.max(4, window.innerWidth - 4), Math.round(x)));
+    }
+    function clampY(y) {
+      return Math.max(4, Math.min(Math.max(4, window.innerHeight - 4), Math.round(y)));
+    }
+    function resolveEndpoint(spec, scrollIfNeeded) {
+      if (!spec) return null;
+      const str = String(spec).trim();
+      const cm = /^(-?\\d+(?:\\.\\d+)?)\\s*,\\s*(-?\\d+(?:\\.\\d+)?)$/.exec(str);
+      if (cm) {
+        const x = clampX(Number(cm[1]));
+        const y = clampY(Number(cm[2]));
+        const el = document.elementFromPoint(x, y) || document.body;
+        return { matchedBy: "coords", el, x, y, rect: null };
+      }
+      const isTxt = str.startsWith("text=");
+      const forceTxt = ${JSON.stringify(byText)} || isTxt;
+      const q = isTxt ? str.slice(5) : str;
+      let el = null;
+      let matchedBy = "selector";
+      if (!forceTxt) {
+        try {
+          const all = Array.from(document.querySelectorAll(q));
+          const vis = all.filter(isVisible);
+          el = (vis.length > 0 ? vis : all)[0] || null;
+        } catch { el = null; }
+      }
+      if (!el) {
+        matchedBy = "text";
+        const qNorm = q.trim();
+        const searchPool = (sel) => {
+          const nodes = Array.from(document.querySelectorAll(sel)).filter(isVisible);
+          const ex = [];
+          const pt = [];
+          for (const n of nodes) {
+            const txt = (n.innerText || n.textContent || "").replace(/\\s+/g, " ").trim();
+            const aria = (n.getAttribute("aria-label") || "").trim();
+            if (txt === qNorm || aria === qNorm) ex.push(n);
+            else if (!${JSON.stringify(exact)} && (txt.includes(q) || aria.includes(q))) pt.push(n);
+          }
+          const cmp = (a, b) => ((a.innerText || "").trim().length - (b.innerText || "").trim().length);
+          ex.sort(cmp);
+          pt.sort(cmp);
+          return [...ex, ...pt];
+        };
+        let found = searchPool("button, [role='button'], [draggable='true'], a, [role='slider'], input, li, label");
+        if (found.length === 0) {
+          found = searchPool("span, div, p, td, th, h1, h2, h3, h4, h5, h6");
+        }
+        el = found[0] || null;
+      }
+      if (!el) return { error: "No element matches " + str };
+      if (scrollIfNeeded) {
+        el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+      }
+      const r = el.getBoundingClientRect();
+      return {
+        matchedBy,
+        el,
+        x: clampX(r.left + r.width / 2),
+        y: clampY(r.top + r.height / 2),
+        rect: { left: r.left, top: r.top, width: r.width, height: r.height }
+      };
+    }
+
+    const fromPt = resolveEndpoint(${JSON.stringify(fromSpec)}, true);
+    if (!fromPt || fromPt.error) {
+      return { ok: false, error: fromPt?.error || "Failed to locate drag start" };
+    }
+
+    let toPt = null;
+    if (${JSON.stringify(Boolean(toSpec))}) {
+      toPt = resolveEndpoint(${JSON.stringify(toSpec)}, false);
+      if (!toPt || toPt.error) {
+        return { ok: false, error: toPt?.error || "Failed to locate drag destination" };
+      }
+    }
+
+    // Refresh fromPt after any scroll
+    if (fromPt.el && fromPt.matchedBy !== "coords") {
+      const rf = fromPt.el.getBoundingClientRect();
+      fromPt.x = clampX(rf.left + rf.width / 2);
+      fromPt.y = clampY(rf.top + rf.height / 2);
+      fromPt.rect = { left: rf.left, top: rf.top, width: rf.width, height: rf.height };
+    }
+
+    const offX = ${Number.isFinite(explicitDx) ? Math.round(explicitDx) : 0};
+    const offY = ${Number.isFinite(explicitDy) ? Math.round(explicitDy) : 0};
+    const toX = clampX((toPt ? toPt.x : fromPt.x) + offX);
+    const toY = clampY((toPt ? toPt.y : fromPt.y) + offY);
+    const toRect = toPt && offX === 0 && offY === 0 ? toPt.rect : null;
+
+    const draggableSource = fromPt.el?.closest?.("[draggable='true']") || (fromPt.el?.draggable ? fromPt.el : null);
+    const useHtml5 = ${html5 === true ? "true" : html5 === false ? "false" : "Boolean(draggableSource)"};
+
+    if (${JSON.stringify(cursorMode !== "off")}) {
+      try {
+        (${CURSOR_HELPER_SOURCE}).startDrag(
+          fromPt.x,
+          fromPt.y,
+          fromPt.rect,
+          ${cursorMode === "demo" ? 180 : 90},
+          ${durationMs + 1200}
+        );
+      } catch {}
+      if (${JSON.stringify(cursorMode === "demo")}) {
+        await new Promise((r) => setTimeout(r, 180));
+      }
+    }
+
+    if (useHtml5 && typeof DragEvent === "function" && typeof DataTransfer === "function") {
+      const dt = new DataTransfer();
+      const srcNode = draggableSource || fromPt.el;
+      window[Symbol.for("cdp.bridge.activeDrag")] = {
+        srcNode,
+        dt,
+        lastOverNode: null
+      };
+      try {
+        srcNode.dispatchEvent(new DragEvent("dragstart", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: fromPt.x,
+          clientY: fromPt.y,
+          dataTransfer: dt
+        }));
+      } catch {}
+    }
+
+    return {
+      ok: true,
+      fromX: fromPt.x,
+      fromY: fromPt.y,
+      fromTag: fromPt.el?.tagName || null,
+      fromText: (fromPt.el?.innerText || fromPt.el?.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80),
+      toX,
+      toY,
+      toRect,
+      toTag: toPt?.el?.tagName || null,
+      toText: (toPt?.el?.innerText || toPt?.el?.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 80),
+      useHtml5
+    };
+  })()`;
+
+  const prepRes = await evaluateInPage(page, prepExpr, { timeoutMs });
+  const prep = prepRes.evaluation?.value;
+  if (!prep?.ok) {
+    throw new Error(prep?.error || `Drag failed from ${fromSpec}`);
+  }
+
+  await callPage(
+    page,
+    "Input.dispatchMouseEvent",
+    { type: "mouseMoved", x: prep.fromX, y: prep.fromY, button: "none", buttons: 0 },
+    timeoutMs,
+  );
+  await callPage(
+    page,
+    "Input.dispatchMouseEvent",
+    {
+      type: "mousePressed",
+      x: prep.fromX,
+      y: prep.fromY,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    },
+    timeoutMs,
+  );
+
+  const stepDelayMs = Math.max(8, Math.round(durationMs / steps));
+  for (let s = 1; s <= steps; s += 1) {
+    const t = s / steps;
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const curX = Math.round(prep.fromX + (prep.toX - prep.fromX) * eased);
+    const curY = Math.round(prep.fromY + (prep.toY - prep.fromY) * eased);
+
+    await callPage(
+      page,
+      "Input.dispatchMouseEvent",
+      {
+        type: "mouseMoved",
+        x: curX,
+        y: curY,
+        button: "left",
+        buttons: 1,
+      },
+      timeoutMs,
+    );
+
+    if (cursorMode !== "off" || prep.useHtml5) {
+      await evaluateInPage(
+        page,
+        `(() => {
+          if (${JSON.stringify(cursorMode !== "off")}) {
+            try { (${CURSOR_HELPER_SOURCE}).stepDrag(${curX}, ${curY}, ${prep.fromX}, ${prep.fromY}, 600); } catch {}
+          }
+          const ctx = window[Symbol.for("cdp.bridge.activeDrag")];
+          if (ctx && ctx.dt) {
+            const overEl = document.elementFromPoint(${curX}, ${curY}) || document.body;
+            if (overEl !== ctx.lastOverNode) {
+              if (ctx.lastOverNode) {
+                try {
+                  ctx.lastOverNode.dispatchEvent(new DragEvent("dragleave", {
+                    bubbles: true, cancelable: true, composed: true, clientX: ${curX}, clientY: ${curY}, dataTransfer: ctx.dt
+                  }));
+                } catch {}
+              }
+              try {
+                overEl.dispatchEvent(new DragEvent("dragenter", {
+                  bubbles: true, cancelable: true, composed: true, clientX: ${curX}, clientY: ${curY}, dataTransfer: ctx.dt
+                }));
+              } catch {}
+              ctx.lastOverNode = overEl;
+            }
+            try {
+              overEl.dispatchEvent(new DragEvent("dragover", {
+                bubbles: true, cancelable: true, composed: true, clientX: ${curX}, clientY: ${curY}, dataTransfer: ctx.dt
+              }));
+            } catch {}
+          }
+          return true;
+        })()`,
+        { awaitPromise: false, timeoutMs: 5_000 },
+      ).catch(() => {});
+    }
+
+    if (s < steps) {
+      await sleep(stepDelayMs);
+    }
+  }
+
+  await callPage(
+    page,
+    "Input.dispatchMouseEvent",
+    {
+      type: "mouseReleased",
+      x: prep.toX,
+      y: prep.toY,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    },
+    timeoutMs,
+  );
+
+  await evaluateInPage(
+    page,
+    `(() => {
+      const ctxSym = Symbol.for("cdp.bridge.activeDrag");
+      const ctx = window[ctxSym];
+      if (ctx && ctx.dt) {
+        const dropEl = document.elementFromPoint(${prep.toX}, ${prep.toY}) || document.body;
+        try {
+          dropEl.dispatchEvent(new DragEvent("drop", {
+            bubbles: true, cancelable: true, composed: true, clientX: ${prep.toX}, clientY: ${prep.toY}, dataTransfer: ctx.dt
+          }));
+        } catch {}
+        if (ctx.srcNode) {
+          try {
+            ctx.srcNode.dispatchEvent(new DragEvent("dragend", {
+              bubbles: true, cancelable: true, composed: true, clientX: ${prep.toX}, clientY: ${prep.toY}, dataTransfer: ctx.dt
+            }));
+          } catch {}
+        }
+        delete window[ctxSym];
+      }
+      if (${JSON.stringify(cursorMode !== "off")}) {
+        try {
+          (${CURSOR_HELPER_SOURCE}).finishDrag(
+            ${prep.toX},
+            ${prep.toY},
+            ${prep.fromX},
+            ${prep.fromY},
+            ${JSON.stringify(prep.toRect)},
+            ${JSON.stringify(persistCursor)}
+          );
+        } catch {}
+      }
+      return true;
+    })()`,
+    { awaitPromise: false, timeoutMs: 5_000 },
+  ).catch(() => {});
+
+  if (cursorMode === "demo") {
+    await sleep(220);
+  }
+
+  const distancePx = Math.round(
+    Math.hypot(prep.toX - prep.fromX, prep.toY - prep.fromY),
+  );
+  return {
+    page,
+    ok: true,
+    from: {
+      x: prep.fromX,
+      y: prep.fromY,
+      tag: prep.fromTag,
+      text: prep.fromText || undefined,
+    },
+    to: {
+      x: prep.toX,
+      y: prep.toY,
+      tag: prep.toTag,
+      text: prep.toText || undefined,
+    },
+    deltaX: prep.toX - prep.fromX,
+    deltaY: prep.toY - prep.fromY,
+    distancePx,
+    steps,
+    html5Drag: Boolean(prep.useHtml5),
+  };
+}
+
 const SCROLL_DIRECTIONS = new Set([
   "down",
   "up",
@@ -2842,15 +3219,16 @@ Page Inspection & Navigation:
   page-eval <target> [expr]               Evaluate JS in page (alias: eval; --file <path>, --stdin, --no-await, --raw)
   page-text <target> [selector]           Read page/element innerText (alias: text; --max-length <n>, --raw)
   page-screenshot <target> [out-path]     Save PNG/JPEG/WebP screenshot (aliases: screenshot, shot; --selector, --full-page, --with-cursor/--keep-cursor)
-  page-record <start|stop|status|cancel>  Record page interaction video to .webm/.mp4/.gif (alias: record, screencast; or --duration <ms>)
+  page-record <start|pause|resume|stop|concat|status|cancel> Record/pause/merge WebM/MP4/GIF videos (alias: record, screencast; --duration <ms>)
   page-navigate <target> <url>            Navigate tab to URL (aliases: navigate, goto, nav, page-goto; or --new <url>)
   page-reload <target> [--ignore-cache]   Reload page and wait until readyState is complete (alias: reload)
   page-wait <target> [selector-or-expr]   Wait for selector, --text <str>, or truthy JS expr (alias: wait; --timeout <ms>)
 
 Page Interaction (React / Vue / Radix UI / TipTap ProseMirror compatible):
   page-fill <target> <selector> [text]    Fill input/textarea/select/contenteditable (aliases: fill, type, page-type; --clear, --append, --submit)
-  page-click <target> <selector-or-text>  Click by CSS selector or visible text (alias: click; --text, --exact, --index <n>, --wait-for <sel>, --native)
+  page-click <target> <selector-or-text>  Click by CSS selector, visible text, or x,y (alias: click; --text, --exact, --index <n>, --wait-for <sel>, --native)
   page-hover <target> <selector-or-x,y>   Move & hover pointer on element or x,y coords until user takeover (aliases: hover, move)
+  page-drag <target> <from> [to]          Drag between elements/x,y or by --dx/--dy (aliases: drag, dnd; Pointer/Mouse + HTML5 DragEvent, --steps)
   page-scroll <target> [sel|x,y] [dir] [px] Simulate mouse wheel scroll & directional badge (aliases: scroll, wheel; down|up|left|right|top|bottom|into-view, --dx, --dy, --steps)
   batch [target] [steps-json]             Run multiple steps sequentially over one connection (--file <path> | --stdin | --record <out.webm>)
 
@@ -2896,10 +3274,31 @@ async function startPageRecording(targetQuery, outPathArg, flags = {}) {
         maxDurationMs:
           flags["max-duration"] !== undefined ? Number(flags["max-duration"]) : 180_000,
         focus: !flags["no-focus"],
+        hud: !flags["no-hud"],
+        badge: !flags["no-badge"],
+        label: typeof flags.label === "string" ? flags.label : undefined,
       },
     },
     resolveTimeoutMs(flags, 20_000),
   );
+  // Graceful HUD fallback if connected to an older pre-v1.7 daemon in memory
+  if (started.hud === undefined && !flags["no-hud"]) {
+    const page = await resolvePage(started.targetId || targetQuery).catch(() => null);
+    if (page) {
+      const lbl = typeof flags.label === "string" ? flags.label : "";
+      const showToast = !flags["no-badge"];
+      await evaluateInPage(
+        page,
+        `(() => {
+          const h = (${CURSOR_HELPER_SOURCE});
+          h.setRecordingHud({ state: "rec", elapsedBaseMs: 0, label: ${JSON.stringify(lbl)} });
+          if (${JSON.stringify(showToast)}) h.showRecordingToast("● 开始录制验收画面", 2000);
+          return true;
+        })()`,
+        { awaitPromise: false, timeoutMs: 3_000 },
+      ).catch(() => {});
+    }
+  }
   return started;
 }
 
@@ -2913,6 +3312,18 @@ async function stopAndFinalizeRecording(targetQuery, outPathArg, flags = {}) {
     },
     Math.min(timeoutMs, 20_000),
   );
+
+  // Ensure any client-injected HUD is cleared even on older pre-v1.7 daemon
+  if (stopPayload.pauseCount === undefined && stopPayload.targetId) {
+    const page = await resolvePage(stopPayload.targetId).catch(() => null);
+    if (page) {
+      await evaluateInPage(
+        page,
+        `(() => { try { (${CURSOR_HELPER_SOURCE}).clearRecordingHud(); } catch {} return true; })()`,
+        { awaitPromise: false, timeoutMs: 2_500 },
+      ).catch(() => {});
+    }
+  }
 
   const videoInfo = await finalizeRecordingVideo(
     stopPayload,
@@ -3011,6 +3422,33 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
           results.push({ index: i, cmd, ok: true, sleptMs: ms });
           continue;
         }
+        if (cmd === "record-pause" || cmd === "pause-record") {
+          const pauseTarget = recordingTargetId || currentPage?.targetId;
+          const pr = await requestBridge({
+            id: 1,
+            method: "bridge.record.pause",
+            params: {
+              ...(pauseTarget ? { targetId: pauseTarget } : {}),
+              badge: step.badge !== false,
+            },
+          });
+          results.push({ index: i, cmd, ok: true, ...pr });
+          continue;
+        }
+        if (cmd === "record-resume" || cmd === "resume-record") {
+          const resumeTarget = recordingTargetId || currentPage?.targetId;
+          const rr = await requestBridge({
+            id: 1,
+            method: "bridge.record.resume",
+            params: {
+              ...(resumeTarget ? { targetId: resumeTarget } : {}),
+              badge: step.badge !== false,
+              toastText: step.label || step.toastText,
+            },
+          });
+          results.push({ index: i, cmd, ok: true, ...rr });
+          continue;
+        }
         if (cmd === "open") {
           const created = await requestBridge({
             id: 1,
@@ -3068,6 +3506,37 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
             },
           );
           const { page: _p, ...rest } = hv;
+          stepRes = rest;
+        } else if (cmd === "drag" || cmd === "page-drag" || cmd === "dnd") {
+          const dg = await dragInPage(currentPage, {
+            fromSpec:
+              step.from ??
+              step.source ??
+              (step.fromX !== undefined && step.fromY !== undefined
+                ? `${step.fromX},${step.fromY}`
+                : null),
+            toSpec:
+              step.to ??
+              step.destination ??
+              (step.toX !== undefined && step.toY !== undefined
+                ? `${step.toX},${step.toY}`
+                : null),
+            dx: step.dx ?? step.deltaX,
+            dy: step.dy ?? step.deltaY,
+            byText: Boolean(step.byText),
+            exact: Boolean(step.exact),
+            steps: step.steps,
+            durationMs: step.durationMs ?? step.duration,
+            html5:
+              step.html5 !== undefined
+                ? Boolean(step.html5)
+                : step.pointerOnly
+                  ? false
+                  : undefined,
+            cursorMode: resolveStepCursor(step),
+            timeoutMs: stepTimeout,
+          });
+          const { page: _p, ...rest } = dg;
           stepRes = rest;
         } else if (
           cmd === "scroll" ||
@@ -3624,9 +4093,16 @@ async function main() {
   ) {
     const { flags, positional } = parseFlags(
       restArgs,
-      ["no-focus"],
+      ["no-focus", "no-hud", "no-badge", "rm", "cleanup"],
       globalFlags,
     );
+    const outFlagVal =
+      typeof flags.output === "string"
+        ? flags.output
+        : typeof flags.o === "string"
+          ? flags.o
+          : undefined;
+
     const looksLikeVideoPath = (val) =>
       typeof val === "string" &&
       (/\.(webm|mp4|gif|mkv|mov|avi)$/i.test(val) ||
@@ -3638,7 +4114,12 @@ async function main() {
     const firstToken = String(positional[0] || "").toLowerCase();
     const knownSubcmds = new Set([
       "start",
+      "pause",
+      "resume",
       "stop",
+      "concat",
+      "merge",
+      "join",
       "status",
       "list",
       "cancel",
@@ -3662,6 +4143,72 @@ async function main() {
       return { outputMode: formatMode(flags), data };
     }
 
+    if (subcmd === "pause") {
+      const { targetQuery } = takeTargetArg(subPositional, flags);
+      if (targetQuery) diagTelemetry.targetQuery = targetQuery;
+      const data = await requestBridge(
+        {
+          id: 1,
+          method: "bridge.record.pause",
+          params: {
+            ...(targetQuery ? { targetId: targetQuery } : {}),
+            badge: !flags["no-badge"],
+          },
+        },
+        resolveTimeoutMs(flags, 10_000),
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "resume") {
+      const { targetQuery } = takeTargetArg(subPositional, flags);
+      if (targetQuery) diagTelemetry.targetQuery = targetQuery;
+      const data = await requestBridge(
+        {
+          id: 1,
+          method: "bridge.record.resume",
+          params: {
+            ...(targetQuery ? { targetId: targetQuery } : {}),
+            focus: Boolean(flags.focus),
+            badge: !flags["no-badge"],
+            toastText: typeof flags.label === "string" ? flags.label : undefined,
+          },
+        },
+        resolveTimeoutMs(flags, 15_000),
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
+    if (subcmd === "concat" || subcmd === "merge" || subcmd === "join") {
+      let inputs = subPositional.slice();
+      let concatOut = outFlagVal;
+      if (!concatOut && inputs.length >= 3) {
+        // Support `cdp record concat seg1.webm seg2.webm -o out.webm` or `--output out.webm`
+      }
+      if (inputs.length < 2) {
+        throw new Error(
+          "Usage: cdp record concat <seg1.webm> <seg2.webm> [...more] -o <merged.webm> [--rm] [--no-badge]",
+        );
+      }
+      const optionalBridge =
+        flags["no-badge"] || flags["no-hud"]
+          ? null
+          : (payload, tMs) =>
+              requestBridge(payload, tMs, { allowAutoStart: false });
+      const data = await concatRecordingVideos(
+        inputs,
+        {
+          outputPath: concatOut,
+          showBadge: !flags["no-badge"] && !flags["no-hud"],
+          badgeLabel: typeof flags.label === "string" ? flags.label : undefined,
+          cleanupInputs: Boolean(flags.rm || flags.cleanup),
+          timeoutMs: resolveTimeoutMs(flags, 90_000),
+        },
+        optionalBridge,
+      );
+      return { outputMode: formatMode(flags), data };
+    }
+
     if (subcmd === "cancel" || subcmd === "abort") {
       const { targetQuery } = takeTargetArg(subPositional, flags);
       const data = await requestBridge(
@@ -3679,12 +4226,10 @@ async function main() {
       const { targetQuery, restPositional } = takeTargetArg(subPositional, flags);
       if (!targetQuery) {
         throw new Error(
-          "Usage: cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--max-width <px>] [--max-height <px>] [--max-duration <ms>] [--no-focus]",
+          "Usage: cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--label <text>] [--no-hud] [--no-focus]",
         );
       }
-      const outPathArg =
-        restPositional[0] ||
-        (typeof flags.output === "string" ? flags.output : undefined);
+      const outPathArg = restPositional[0] || outFlagVal;
       const data = await startPageRecording(targetQuery, outPathArg, flags);
       diagTelemetry.targetQuery = targetQuery;
       return { outputMode: formatMode(flags), data };
@@ -3693,8 +4238,7 @@ async function main() {
     if (subcmd === "stop") {
       let targetQuery =
         typeof flags.target === "string" ? flags.target : undefined;
-      let outPathArg =
-        typeof flags.output === "string" ? flags.output : undefined;
+      let outPathArg = outFlagVal;
 
       if (!targetQuery && subPositional.length === 1) {
         if (looksLikeVideoPath(subPositional[0])) {
@@ -3725,9 +4269,7 @@ async function main() {
           "Usage: cdp record <target> [output.webm] --duration <ms> [--fps <n>] [--quality <n>]",
         );
       }
-      const outPathArg =
-        restPositional[0] ||
-        (typeof flags.output === "string" ? flags.output : undefined);
+      const outPathArg = restPositional[0] || outFlagVal;
       diagTelemetry.targetQuery = targetQuery;
       const started = await startPageRecording(targetQuery, outPathArg, {
         ...flags,
@@ -3753,8 +4295,11 @@ async function main() {
 
     throw new Error(
       "Usage:\n" +
-        "  cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--max-width <px>] [--max-height <px>] [--no-focus]\n" +
+        "  cdp record start <target> [output.webm] [--fps <n>] [--quality <n>] [--label <text>] [--no-hud] [--no-focus]\n" +
+        "  cdp record pause [target] [--no-badge]\n" +
+        "  cdp record resume [target] [--label <toast>] [--no-badge]\n" +
         "  cdp record stop [target] [output.webm] [--fps <n>] [--bitrate <bps>] [--keep-frames <dir>]\n" +
+        "  cdp record concat <seg1.webm> <seg2.webm> [...more] -o <merged.webm> [--rm] [--no-badge]\n" +
         "  cdp record status\n" +
         "  cdp record cancel [target]\n" +
         "  cdp record <target> [output.webm] --duration <ms>",
@@ -3846,6 +4391,56 @@ async function main() {
       nativeMouse: Boolean(flags.native),
       cursorMode: resolvePageCursorMode(flags, page),
       timeoutMs: resolveTimeoutMs(flags, 15_000),
+    });
+    return { outputMode: formatMode(flags), data };
+  }
+
+  if (command === "page-drag" || command === "drag" || command === "dnd") {
+    const { flags, positional } = parseFlags(
+      restArgs,
+      ["text", "exact", "html5", "pointer-only"],
+      globalFlags,
+    );
+    const { targetQuery, restPositional } = takeTargetArg(positional, flags);
+    const fromSpec =
+      restPositional[0] ||
+      (typeof flags.from === "string" ? flags.from : undefined);
+    const toSpec =
+      restPositional[1] ||
+      (typeof flags.to === "string" ? flags.to : undefined);
+    const dx =
+      flags.dx !== undefined && flags.dx !== true ? Number(flags.dx) : undefined;
+    const dy =
+      flags.dy !== undefined && flags.dy !== true ? Number(flags.dy) : undefined;
+
+    if (!targetQuery || !fromSpec || (!toSpec && !Number.isFinite(dx) && !Number.isFinite(dy))) {
+      throw new Error(
+        "Usage: cdp drag <target> <from-sel-or-x,y> [to-sel-or-x,y] [--dx <px>] [--dy <px>] [--steps <n>] [--duration <ms>] [--html5 | --pointer-only]",
+      );
+    }
+    const page = await resolvePage(targetQuery);
+    const data = await dragInPage(page, {
+      fromSpec,
+      toSpec,
+      dx,
+      dy,
+      byText: Boolean(flags.text),
+      exact: Boolean(flags.exact),
+      steps:
+        flags.steps !== undefined && flags.steps !== true
+          ? Number(flags.steps)
+          : undefined,
+      durationMs:
+        flags.duration !== undefined && flags.duration !== true
+          ? Number(flags.duration)
+          : undefined,
+      html5: flags.html5
+        ? true
+        : flags["pointer-only"]
+          ? false
+          : undefined,
+      cursorMode: resolvePageCursorMode(flags, page),
+      timeoutMs: resolveTimeoutMs(flags, 20_000),
     });
     return { outputMode: formatMode(flags), data };
   }

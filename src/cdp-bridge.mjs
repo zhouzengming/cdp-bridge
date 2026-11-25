@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import util from "node:util";
+import { CURSOR_HELPER_SOURCE } from "./cursor.mjs";
 import { trySpawnWindowsWmiBreakaway } from "./win-spawn.mjs";
 
 process.stdout?.setDefaultEncoding?.("utf8");
@@ -792,6 +793,7 @@ async function serveBridge() {
           recordingId: rec.recordingId,
           startedAtMs: rec.startedAtMs,
           outputPath: rec.outputPath,
+          paused: Boolean(rec.paused),
         };
       }
       fs.writeFileSync(activeRecordingsPath, JSON.stringify(snapshot, null, 2));
@@ -802,11 +804,95 @@ async function serveBridge() {
     }
   }
 
-  function appendScreencastFrame(rec, base64Data, metadata = {}) {
-    if (!rec || rec.stopping || !base64Data || rec.frames.length >= rec.maxFrames) {
+  function formatWaitDurationLabel(ms) {
+    if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+    const mins = Math.floor(ms / 60_000);
+    const secs = Math.round((ms % 60_000) / 1000);
+    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  }
+
+  async function syncRecordingOverlayInPage(rec, hudConfig = {}) {
+    if (!rec || !rec.showHud || !rec.sessionId) return;
+    const state = hudConfig.state || "off";
+    const elapsedBaseMs = Math.max(0, Math.round(hudConfig.elapsedBaseMs || 0));
+    const label = hudConfig.label || rec.label || "";
+    const toastText = hudConfig.toastText || "";
+
+    if (rec.hudScriptIdentifier) {
+      await forwardBrowserCommand(
+        "Page.removeScriptToEvaluateOnNewDocument",
+        { identifier: rec.hudScriptIdentifier },
+        rec.sessionId,
+        2_000,
+      ).catch(() => {});
+      rec.hudScriptIdentifier = null;
+    }
+
+    if (state === "rec" || state === "paused") {
+      const bootRegisteredAt = Date.now();
+      const newDocScript = `(() => {
+        const mount = () => {
+          try {
+            const elapsed = ${state === "rec" ? `${elapsedBaseMs} + Math.max(0, Date.now() - ${bootRegisteredAt})` : `${elapsedBaseMs}`};
+            (${CURSOR_HELPER_SOURCE}).setRecordingHud({
+              state: ${JSON.stringify(state)},
+              elapsedBaseMs: elapsed,
+              label: ${JSON.stringify(label)}
+            });
+          } catch {}
+        };
+        if (document.documentElement) mount();
+        else window.addEventListener("DOMContentLoaded", mount, { once: true });
+      })();`;
+      const added = await forwardBrowserCommand(
+        "Page.addScriptToEvaluateOnNewDocument",
+        { source: newDocScript },
+        rec.sessionId,
+        2_500,
+      ).catch(() => null);
+      if (added?.identifier) {
+        rec.hudScriptIdentifier = added.identifier;
+      }
+    }
+
+    const evalExpr = `(() => {
+      try {
+        const helper = (${CURSOR_HELPER_SOURCE});
+        helper.setRecordingHud({
+          state: ${JSON.stringify(state)},
+          elapsedBaseMs: ${elapsedBaseMs},
+          label: ${JSON.stringify(label)}
+        });
+        if (${JSON.stringify(Boolean(toastText))}) {
+          helper.showRecordingToast(${JSON.stringify(toastText)}, 2200);
+        }
+      } catch {}
+      return true;
+    })()`;
+
+    await forwardBrowserCommand(
+      "Runtime.evaluate",
+      { expression: evalExpr, returnByValue: true },
+      rec.sessionId,
+      2_500,
+    ).catch(() => {});
+  }
+
+  function appendScreencastFrame(rec, base64Data, metadata = {}, allowWhenPaused = false) {
+    if (
+      !rec ||
+      rec.stopping ||
+      (rec.paused && !allowWhenPaused) ||
+      !base64Data ||
+      rec.frames.length >= rec.maxFrames
+    ) {
       return;
     }
     const nowMs = Date.now();
+    const effectivePauseMs =
+      rec.pausedTotalMs + (rec.paused && rec.pausedAtMs ? Math.max(0, nowMs - rec.pausedAtMs) : 0);
+    const effectiveTimeMs = Math.max(0, nowMs - rec.startedAtMs - effectivePauseMs);
     const idx = rec.nextFrameIndex++;
     const fileName = `frame-${String(idx).padStart(5, "0")}.jpg`;
     const filePath = path.join(rec.spoolDir, fileName);
@@ -816,6 +902,7 @@ async function serveBridge() {
       file: filePath,
       bytes: buf.length,
       wallTimeMs: nowMs,
+      effectiveTimeMs,
       deviceWidth: metadata.deviceWidth || 0,
       deviceHeight: metadata.deviceHeight || 0,
     });
@@ -1148,18 +1235,26 @@ async function serveBridge() {
     }
     if (method === "bridge.record.status") {
       const now = Date.now();
-      const list = Array.from(recordingsByTarget.values()).map((rec) => ({
-        recordingId: rec.recordingId,
-        targetId: rec.targetId,
-        title: rec.title,
-        url: rec.url,
-        outputPath: rec.outputPath,
-        startedAt: new Date(rec.startedAtMs).toISOString(),
-        elapsedMs: now - rec.startedAtMs,
-        capturedFrames: rec.frames.length,
-        totalBytes: rec.totalBytes,
-        autoStopped: rec.autoStopped,
-      }));
+      const list = Array.from(recordingsByTarget.values()).map((rec) => {
+        const curPausedMs =
+          rec.pausedTotalMs + (rec.paused && rec.pausedAtMs ? Math.max(0, now - rec.pausedAtMs) : 0);
+        return {
+          recordingId: rec.recordingId,
+          targetId: rec.targetId,
+          title: rec.title,
+          url: rec.url,
+          outputPath: rec.outputPath,
+          paused: rec.paused,
+          pauseCount: rec.pauseCount,
+          pausedTotalMs: curPausedMs,
+          startedAt: new Date(rec.startedAtMs).toISOString(),
+          elapsedMs: Math.max(0, now - rec.startedAtMs - curPausedMs),
+          wallElapsedMs: now - rec.startedAtMs,
+          capturedFrames: rec.frames.length,
+          totalBytes: rec.totalBytes,
+          autoStopped: rec.autoStopped,
+        };
+      });
       return { count: list.length, recordings: list };
     }
     if (method === "bridge.record.start") {
@@ -1182,6 +1277,8 @@ async function serveBridge() {
         Math.min(600_000, Number(params.maxDurationMs) || 180_000),
       );
       const maxFrames = Math.max(10, Math.min(10_000, Number(params.maxFrames) || 3600));
+      const showHud = params.hud !== false;
+      const label = params.label ? String(params.label) : "";
 
       const rec = {
         recordingId,
@@ -1194,8 +1291,18 @@ async function serveBridge() {
         quality,
         maxWidth,
         maxHeight,
+        everyNthFrame,
+        maxDurationMs,
+        remainingMaxMs: maxDurationMs,
         maxFrames,
+        showHud,
+        label,
+        hudScriptIdentifier: null,
         startedAtMs: Date.now(),
+        paused: false,
+        pausedAtMs: 0,
+        pausedTotalMs: 0,
+        pauseCount: 0,
         nextFrameIndex: 0,
         totalBytes: 0,
         frames: [],
@@ -1203,7 +1310,22 @@ async function serveBridge() {
         stopping: false,
         autoStopped: false,
         maxTimer: null,
+        resumeFollowTimer: null,
       };
+
+      const armMaxTimer = (ms) => {
+        if (rec.maxTimer) clearTimeout(rec.maxTimer);
+        rec.maxTimer = setTimeout(() => {
+          rec.autoStopped = true;
+          rec.stopping = true;
+          void forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
+            () => {},
+          );
+          void syncRecordingOverlayInPage(rec, { state: "off" });
+        }, ms);
+        rec.maxTimer.unref?.();
+      };
+      rec.armMaxTimer = armMaxTimer;
 
       recordingsByTarget.set(page.targetId, rec);
       recordingsBySession.set(page.sessionId, rec);
@@ -1222,6 +1344,15 @@ async function serveBridge() {
           page.sessionId,
           5_000,
         ).catch(() => {});
+
+        if (showHud) {
+          await syncRecordingOverlayInPage(rec, {
+            state: "rec",
+            elapsedBaseMs: 0,
+            label,
+            toastText: params.badge === false ? "" : "● 开始录制验收画面",
+          });
+        }
 
         await forwardBrowserCommand(
           "Page.startScreencast",
@@ -1250,6 +1381,7 @@ async function serveBridge() {
           }
         }
       } catch (err) {
+        await syncRecordingOverlayInPage(rec, { state: "off" });
         recordingsByTarget.delete(page.targetId);
         recordingsBySession.delete(page.sessionId);
         syncActiveRecordingsFile();
@@ -1259,14 +1391,7 @@ async function serveBridge() {
         throw err;
       }
 
-      rec.maxTimer = setTimeout(() => {
-        rec.autoStopped = true;
-        rec.stopping = true;
-        void forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
-          () => {},
-        );
-      }, maxDurationMs);
-      rec.maxTimer.unref?.();
+      armMaxTimer(maxDurationMs);
 
       return {
         recording: true,
@@ -1280,14 +1405,181 @@ async function serveBridge() {
         maxWidth,
         maxHeight,
         maxDurationMs,
+        hud: showHud,
+      };
+    }
+    if (method === "bridge.record.pause") {
+      const rec = findActiveRecording(params.targetId || params.target);
+      if (rec.paused) {
+        return {
+          paused: true,
+          alreadyPaused: true,
+          recordingId: rec.recordingId,
+          targetId: rec.targetId,
+          capturedFrames: rec.frames.length,
+        };
+      }
+      if (rec.maxTimer) {
+        clearTimeout(rec.maxTimer);
+        rec.maxTimer = null;
+      }
+      if (rec.resumeFollowTimer) {
+        clearTimeout(rec.resumeFollowTimer);
+        rec.resumeFollowTimer = null;
+      }
+
+      const prePauseShot = await forwardBrowserCommand(
+        "Page.captureScreenshot",
+        { format: "jpeg", quality: rec.quality },
+        rec.sessionId,
+        4_000,
+      ).catch(() => null);
+      if (prePauseShot?.data) {
+        appendScreencastFrame(rec, prePauseShot.data);
+      }
+
+      const now = Date.now();
+      const activeElapsedMs = Math.max(0, now - rec.startedAtMs - rec.pausedTotalMs);
+      rec.remainingMaxMs = Math.max(5_000, rec.maxDurationMs - activeElapsedMs);
+      rec.paused = true;
+      rec.pausedAtMs = now;
+      syncActiveRecordingsFile();
+
+      await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
+        () => {},
+      );
+      await syncRecordingOverlayInPage(rec, {
+        state: "paused",
+        elapsedBaseMs: activeElapsedMs,
+        label: rec.label,
+        toastText: params.badge === false ? "" : "⏸ 录制已暂停 · 等待中不占存储",
+      });
+
+      return {
+        paused: true,
+        recordingId: rec.recordingId,
+        targetId: rec.targetId,
+        activeElapsedMs,
+        capturedFrames: rec.frames.length,
+      };
+    }
+    if (method === "bridge.record.resume") {
+      const rec = findActiveRecording(params.targetId || params.target);
+      if (!rec.paused) {
+        return {
+          recording: true,
+          resumed: false,
+          alreadyRunning: true,
+          recordingId: rec.recordingId,
+          targetId: rec.targetId,
+          capturedFrames: rec.frames.length,
+        };
+      }
+      const now = Date.now();
+      const skippedMs = Math.max(0, now - rec.pausedAtMs);
+      rec.pausedTotalMs += skippedMs;
+      rec.paused = false;
+      rec.pausedAtMs = 0;
+      rec.pauseCount += 1;
+      const activeElapsedMs = Math.max(0, now - rec.startedAtMs - rec.pausedTotalMs);
+      syncActiveRecordingsFile();
+
+      if (params.focus) {
+        await forwardBrowserCommand("Page.bringToFront", {}, rec.sessionId, 4_000).catch(
+          () => {},
+        );
+      }
+      await forwardBrowserCommand(
+        "Page.setWebLifecycleState",
+        { state: "active" },
+        rec.sessionId,
+        4_000,
+      ).catch(() => {});
+
+      const skipToast =
+        params.badge === false
+          ? ""
+          : params.toastText
+            ? String(params.toastText)
+            : `⏭ 已跳过 ${formatWaitDurationLabel(skippedMs)} 等待`;
+
+      await syncRecordingOverlayInPage(rec, {
+        state: "rec",
+        elapsedBaseMs: activeElapsedMs,
+        label: rec.label,
+        toastText: skipToast,
+      });
+
+      await forwardBrowserCommand(
+        "Page.startScreencast",
+        {
+          format: "jpeg",
+          quality: rec.quality,
+          maxWidth: rec.maxWidth,
+          maxHeight: rec.maxHeight,
+          everyNthFrame: rec.everyNthFrame,
+        },
+        rec.sessionId,
+        10_000,
+      );
+
+      const countBeforeResume = rec.frames.length;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      if (!rec.stopping && !rec.paused && rec.frames.length === countBeforeResume) {
+        const resumeShot = await forwardBrowserCommand(
+          "Page.captureScreenshot",
+          { format: "jpeg", quality: rec.quality },
+          rec.sessionId,
+          4_000,
+        ).catch(() => null);
+        if (resumeShot?.data) {
+          appendScreencastFrame(rec, resumeShot.data);
+        }
+      }
+      rec.resumeFollowTimer = setTimeout(() => {
+        if (!rec.stopping && !rec.paused) {
+          void forwardBrowserCommand(
+            "Page.captureScreenshot",
+            { format: "jpeg", quality: rec.quality },
+            rec.sessionId,
+            3_000,
+          )
+            .then((shot) => {
+              if (shot?.data) appendScreencastFrame(rec, shot.data);
+            })
+            .catch(() => {});
+        }
+      }, 420);
+      rec.resumeFollowTimer.unref?.();
+
+      rec.armMaxTimer?.(rec.remainingMaxMs);
+
+      return {
+        recording: true,
+        resumed: true,
+        recordingId: rec.recordingId,
+        targetId: rec.targetId,
+        skippedMs,
+        pausedTotalMs: rec.pausedTotalMs,
+        pauseCount: rec.pauseCount,
+        activeElapsedMs,
+        capturedFrames: rec.frames.length,
       };
     }
     if (method === "bridge.record.stop") {
       const rec = findActiveRecording(params.targetId || params.target);
       if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      if (rec.resumeFollowTimer) clearTimeout(rec.resumeFollowTimer);
 
-      // Capture final frame so last UI change is guaranteed in the video
-      if (!rec.autoStopped) {
+      const wasPaused = rec.paused;
+      if (rec.paused && rec.pausedAtMs) {
+        rec.pausedTotalMs += Math.max(0, Date.now() - rec.pausedAtMs);
+        rec.paused = false;
+        rec.pausedAtMs = 0;
+      }
+
+      // Capture final frame while HUD is still in REC state (unless stopped directly from paused state)
+      if (!rec.autoStopped && !wasPaused) {
         const finalShot = await forwardBrowserCommand(
           "Page.captureScreenshot",
           { format: "jpeg", quality: rec.quality },
@@ -1303,6 +1595,7 @@ async function serveBridge() {
       await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
         () => {},
       );
+      await syncRecordingOverlayInPage(rec, { state: "off" });
       await Promise.allSettled(Array.from(rec.pendingWrites));
 
       const stoppedAtMs = Date.now();
@@ -1319,6 +1612,8 @@ async function serveBridge() {
         spoolDir: rec.spoolDir,
         startedAtMs: rec.startedAtMs,
         stoppedAtMs,
+        pausedTotalMs: rec.pausedTotalMs,
+        pauseCount: rec.pauseCount,
         frames: rec.frames,
       };
     }
@@ -1326,9 +1621,11 @@ async function serveBridge() {
       const rec = findActiveRecording(params.targetId || params.target);
       rec.stopping = true;
       if (rec.maxTimer) clearTimeout(rec.maxTimer);
+      if (rec.resumeFollowTimer) clearTimeout(rec.resumeFollowTimer);
       await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
         () => {},
       );
+      await syncRecordingOverlayInPage(rec, { state: "off" });
       await Promise.allSettled(Array.from(rec.pendingWrites));
       recordingsByTarget.delete(rec.targetId);
       recordingsBySession.delete(rec.sessionId);
