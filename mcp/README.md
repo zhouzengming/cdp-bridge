@@ -12,11 +12,11 @@
    - `cdp_fill`、`cdp_eval`、`cdp_batch` 等工具通过 `shell: false` 子进程与纯 UTF-8 `stdin` 管道直接投递文本/脚本，完全绕开 `powershell.exe` / `cmd.exe` 的双引号吞吃、`$` 变量误展开与 GBK 代码页问题。
 3. **双帧格式自动协商与权限注解**：
    - 自动识别并自适应 **单行 NDJSON**（MCP `2024-11-05` / `2025-03-26` / `2025-06-18`）与 **`Content-Length` 头部帧**。
-   - 全部 17 个工具均附带标准 MCP `annotations`（`readOnlyHint` / `destructiveHint` / `idempotentHint`），方便宿主按“只读探测 / 页面交互”精细控制审批策略。
+   - 全部 18 个工具均附带标准 MCP `annotations`（`readOnlyHint` / `destructiveHint` / `idempotentHint`），方便宿主按“只读探测 / 页面交互”精细控制审批策略。
 
 ---
 
-## 暴露的 MCP 工具清单（17 个）
+## 暴露的 MCP 工具清单（18 个）
 
 | 工具名 | 只读 (`readOnlyHint`) | 对应能力说明 |
 | :--- | :---: | :--- |
@@ -29,12 +29,13 @@
 | `cdp_logs` | ✅ | 读取页面近期错误/警告日志与未捕获异常 |
 | `cdp_network` | ✅ | 诊断失败请求（4xx/5xx/断网及响应体摘要）或按正则/状态码过滤 API 流量 |
 | `cdp_manage_tab` | ❌ | 新建（含 `background`）、跳转、刷新、置顶唤醒（`focus`）或关闭标签页 |
-| `cdp_click` | ❌ | 按选择器或可见文本点击（兼容 Radix UI / AntD，带 Top-Layer 虚拟指针水波纹） |
+| `cdp_click` | ❌ | 按选择器、可见文本或 `x,y` 点击（带柔和半透明双层水波纹） |
 | `cdp_fill` | ❌ | 纯 UTF-8 管道写入受控输入框、`<select>` 或 `.ProseMirror` 多行富文本 |
 | `cdp_hover` | ❌ | 移动并悬停虚拟指针至元素或 `x,y` 坐标（用户点击页面时平滑淡出接管） |
+| `cdp_drag` | ❌ | 平滑模拟鼠标按住拖动（兼容 Pointer/Mouse 与 HTML5 `DragEvent`，带轨迹虚线与起止波纹） |
 | `cdp_scroll` | ❌ | 模拟鼠标滚轮滚动并展示滚动方向与像素角标 |
-| `cdp_record` | ❌ | 零依赖录制页面操作与虚拟指针视频为 `.webm`（支持 `start`/`stop`/`clip`/`status`/`cancel`；装有 `ffmpeg` 时支持 `.mp4`/`.gif`） |
-| `cdp_batch` | ❌ | 单次连接按序批量执行多步交互（支持 `recordPath` 全程录制验收视频） |
+| `cdp_record` | ❌ | 零依赖高清 `.webm` 录屏（支持 `start` / `pause` / `resume` / `stop` / `concat` 多段无损拼接 / `clip` / `status` / `cancel`，自带右上角 `REC` 状态与跳过等待浮现提示） |
+| `cdp_batch` | ❌ | 单次连接按序批量执行多步交互（支持 `drag`、`record-pause`/`record-resume` 与 `recordPath` 录屏） |
 | `cdp_eval` | ❌ | 纯 UTF-8 管道执行任意页面 JS 表达式 |
 | `cdp_call` | ❌ | 调用底层原始 CDP 协议方法 |
 

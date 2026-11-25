@@ -259,6 +259,40 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "cdp_drag",
+    description:
+      "Simulate smooth mouse press-move-release drag between elements, visible text, or x,y coordinates (or by dx/dy offset). Supports both Pointer/Mouse drag (sliders, splitters, @dnd-kit, canvas) and HTML5 DragEvent (draggable='true' kanban/sortable), with visual trajectory trail and soft water ripples.",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+    inputSchema: {
+      type: "object",
+      required: ["target", "from"],
+      properties: {
+        target: { type: "string", description: "Target ID/prefix, URL, or title." },
+        from: {
+          type: "string",
+          description: "Start CSS selector, 'text=...', or 'x,y' viewport coordinates.",
+        },
+        to: {
+          type: "string",
+          description: "Destination CSS selector, 'text=...', or 'x,y' coordinates (optional if dx/dy set).",
+        },
+        dx: { type: "number", description: "Horizontal pixel offset relative to start/destination." },
+        dy: { type: "number", description: "Vertical pixel offset relative to start/destination." },
+        steps: { type: "integer", description: "Number of interpolated drag steps." },
+        durationMs: { type: "integer", description: "Drag movement duration in ms." },
+        html5: { type: "boolean", description: "Force HTML5 DragEvent (dragstart/dragover/drop) sequence." },
+        pointerOnly: { type: "boolean", description: "Force Pointer/Mouse events only (skip HTML5 DragEvent)." },
+        cursor: { type: "string", enum: CURSOR_ENUM },
+        timeoutMs: { type: "integer" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "cdp_scroll",
     description:
       "Simulate mouse wheel scroll on the page or a scrollable container with directional badge overlay.",
@@ -374,14 +408,19 @@ export const MCP_TOOLS = [
       properties: {
         action: {
           type: "string",
-          enum: ["start", "stop", "status", "cancel", "clip"],
+          enum: ["start", "pause", "resume", "stop", "concat", "status", "cancel", "clip"],
           description:
-            "'start' begins background recording across tool calls; 'stop' finalizes & saves the video; 'clip' records for durationMs in one call; 'status' inspects active recordings; 'cancel' discards.",
+            "'start' begins recording with REC HUD; 'pause'/'resume' skips long waits without disk bloat and shows a skip toast; 'stop' finalizes video; 'concat' merges multiple .webm segments losslessly; 'clip' records for durationMs; 'status' inspects; 'cancel' discards.",
         },
         target: {
           type: "string",
           description:
-            "Target ID/8-char prefix, URL, or title (required for start/clip; optional for stop/cancel if only 1 recording is active).",
+            "Target ID/8-char prefix, URL, or title (required for start/clip; optional for pause/resume/stop/cancel if only 1 recording is active).",
+        },
+        inputs: {
+          type: "array",
+          items: { type: "string" },
+          description: "For action='concat': ordered list of >=2 segment video paths to merge.",
         },
         outputPath: {
           type: "string",
@@ -390,6 +429,22 @@ export const MCP_TOOLS = [
         durationMs: {
           type: "integer",
           description: "For action='clip': duration in ms to record before stopping.",
+        },
+        label: {
+          type: "string",
+          description: "Optional custom HUD label (on start) or toast text (on resume/concat).",
+        },
+        cleanupInputs: {
+          type: "boolean",
+          description: "For action='concat': delete input segment files after successful merge.",
+        },
+        noHud: {
+          type: "boolean",
+          description: "Disable top-right REC indicator pill.",
+        },
+        noBadge: {
+          type: "boolean",
+          description: "Disable floating skip/splice toast notifications.",
         },
         fps: { type: "integer", description: "Max frame rate (default: 30)." },
         quality: { type: "integer", description: "JPEG capture quality 10-100 (default: 92)." },
@@ -753,6 +808,19 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       break;
     }
 
+    case "cdp_drag": {
+      cliArgs = ["drag", "--target", String(args.target), String(args.from)];
+      if (args.to) cliArgs.push(String(args.to));
+      if (args.dx !== undefined) cliArgs.push("--dx", String(args.dx));
+      if (args.dy !== undefined) cliArgs.push("--dy", String(args.dy));
+      if (args.steps !== undefined) cliArgs.push("--steps", String(args.steps));
+      if (args.durationMs !== undefined) cliArgs.push("--duration", String(args.durationMs));
+      if (args.html5) cliArgs.push("--html5");
+      if (args.pointerOnly) cliArgs.push("--pointer-only");
+      pushCommonFlags(cliArgs, args);
+      break;
+    }
+
     case "cdp_scroll": {
       cliArgs = ["scroll", "--target", String(args.target)];
       if (args.selectorOrCoords) cliArgs.push(String(args.selectorOrCoords));
@@ -796,11 +864,20 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
     case "cdp_record": {
       const action = String(args.action || "").toLowerCase();
       cliArgs = ["record", action];
+      if (action === "concat" && Array.isArray(args.inputs)) {
+        for (const inp of args.inputs) {
+          cliArgs.push(String(inp));
+        }
+      }
       if (args.target) cliArgs.push("--target", String(args.target));
       if (args.outputPath) cliArgs.push("--output", String(args.outputPath));
       if (args.durationMs !== undefined) {
         cliArgs.push("--duration", String(args.durationMs));
       }
+      if (args.label) cliArgs.push("--label", String(args.label));
+      if (args.cleanupInputs) cliArgs.push("--rm");
+      if (args.noHud) cliArgs.push("--no-hud");
+      if (args.noBadge) cliArgs.push("--no-badge");
       if (args.fps !== undefined) cliArgs.push("--fps", String(args.fps));
       if (args.quality !== undefined) {
         cliArgs.push("--quality", String(args.quality));
@@ -821,9 +898,9 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       if (args.keepFramesDir) {
         cliArgs.push("--keep-frames", String(args.keepFramesDir));
       }
-      if (action === "stop" || action === "clip") {
+      if (action === "stop" || action === "clip" || action === "concat") {
         const clipExtra = action === "clip" ? Number(args.durationMs || 5_000) : 0;
-        outerTimeoutMs = Math.max(outerTimeoutMs, clipExtra + 75_000);
+        outerTimeoutMs = Math.max(outerTimeoutMs, clipExtra + 90_000);
       }
       pushCommonFlags(cliArgs, args);
       break;

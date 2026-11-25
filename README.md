@@ -238,14 +238,21 @@ cdp screenshot 426B5451 ./pointer-state.png --with-cursor
 cdp shot 426B5451 ./dialog.png --selector "[role='dialog']" --keep-cursor
 cdp screenshot 426B5451 ./full.webp --full-page --format webp --quality 85
 
-# 操作过程录屏（别名：record / page-record / screencast；零依赖直接生成 .webm，装有 ffmpeg 时支持 .mp4 / .gif）
+# 操作过程录屏（别名：record / page-record / screencast；右上角自带 ● REC 计时与跳过等待浮现提示）
 cdp record start 426B5451 ./acceptance.webm
-# ... 执行任意多步 cdp click / fill / scroll / goto / reload（录制期间虚拟指针自动升级为 demo 平滑慢动作）...
-cdp record status
+# ... 执行阶段 1 操作 ...
+cdp record pause 426B5451                             # 暂停采帧（长等待期间 0 存储占用，状态变更为 ⏸ PAUSED）
+cdp wait 426B5451 ".result-ready" --timeout 180000    # 等待慢接口/推理完成
+cdp record resume 426B5451                            # 恢复采帧（自动浮现「⏭ 已跳过 Ns 等待」提示）
+# ... 执行阶段 2 操作 ...
 cdp record stop 426B5451
 
-# 单命令定时录制 5 秒片段，或放弃当前录制
+# 多段独立录屏事后无损拼接（同分辨率纯 JS 毫秒级直拼 + 片段衔接提示，加 --rm 自动清理分段文件）
+cdp record concat ./seg1.webm ./seg2.webm -o ./merged-acceptance.webm --rm
+
+# 单命令定时录制 5 秒片段，或查看状态 / 放弃当前录制
 cdp record 426B5451 ./clip.webm --duration 5000
+cdp record status
 cdp record cancel 426B5451
 ```
 
@@ -265,6 +272,11 @@ cdp click 426B5451 ".tabs-tab" --index 1 --wait 500
 # 移动并悬停虚拟指针至元素或视口坐标（默认持续显示，仅当用户鼠标点击页面接管时平滑淡出）
 cdp hover 426B5451 'button[aria-label="提交"]'
 cdp hover 426B5451 320,180
+
+# 平滑模拟鼠标按住拖动（兼容滑块/分栏条/@dnd-kit Pointer 拖动与 draggable="true" HTML5 拖放，带轨迹虚线与起止水波纹）
+cdp drag 426B5451 "#card-todo-1" "#column-done"
+cdp drag 426B5451 "input[type='range']" --dx 160 --dy 0
+cdp drag 426B5451 280,320 620,320 --steps 16
 
 # 模拟真实鼠标滚轮滚动并在指针右下角标注滚动方向与像素距离（别名：scroll / wheel / page-scroll）
 cdp scroll 426B5451 down 480

@@ -1,7 +1,7 @@
 {
   "name": "cdp-bridge-mcp",
   "displayName": "CDP Bridge (MCP)",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Persistent Chrome DevTools Protocol (CDP) bridge with zero-dependency Stdio MCP server, workflow skill, and direct-port guard hook (ideal for native Windows & sandboxed agents).",
   "author": {
     "name": "zhouzengming",
