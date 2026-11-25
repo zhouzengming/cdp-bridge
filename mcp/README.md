@@ -34,8 +34,8 @@
 | `cdp_hover` | ❌ | 移动并悬停虚拟指针至元素或 `x,y` 坐标（用户点击页面时平滑淡出接管） |
 | `cdp_drag` | ❌ | 平滑模拟鼠标按住拖动（兼容 Pointer/Mouse 与 HTML5 `DragEvent`，带轨迹虚线与起止波纹） |
 | `cdp_scroll` | ❌ | 模拟鼠标滚轮滚动并展示滚动方向与像素角标 |
-| `cdp_record` | ❌ | 零依赖高清 `.webm` 录屏（支持 `start` / `pause` / `resume` / `stop` / `concat` 多段无损拼接 / `clip` / `status` / `cancel`，自带右上角 `REC` 状态与跳过等待浮现提示） |
-| `cdp_batch` | ❌ | 单次连接按序批量执行多步交互（支持 `drag`、`record-pause`/`record-resume` 与 `recordPath` 录屏） |
+| `cdp_record` | ❌ | 零依赖高清 `.webm` 录屏（支持 `start` / `pause` / `resume` / `stop` / `concat` 多段无损拼接 / `clip` / `status` / `cancel`；默认显示右上角高透明 `REC` 提示，传 `hud: false` 可关闭） |
+| `cdp_batch` | ❌ | 单次连接按序批量执行多步交互（支持 `drag`、`record-pause`/`record-resume` 与 `recordPath` 录屏，支持 `hud: false` 关闭右上角提示） |
 | `cdp_eval` | ❌ | 纯 UTF-8 管道执行任意页面 JS 表达式 |
 | `cdp_call` | ❌ | 调用底层原始 CDP 协议方法 |
 

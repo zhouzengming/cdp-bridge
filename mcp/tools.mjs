@@ -438,13 +438,23 @@ export const MCP_TOOLS = [
           type: "boolean",
           description: "For action='concat': delete input segment files after successful merge.",
         },
+        hud: {
+          type: "boolean",
+          description:
+            "Whether to display the top-right recording status indicator and floating prompts (default: true; set false to hide).",
+        },
+        badge: {
+          type: "boolean",
+          description:
+            "Whether to display floating toast prompts on start/pause/resume/concat (default: true; set false to hide toasts only).",
+        },
         noHud: {
           type: "boolean",
-          description: "Disable top-right REC indicator pill.",
+          description: "Alias for hud=false: disable top-right REC indicator pill and prompts.",
         },
         noBadge: {
           type: "boolean",
-          description: "Disable floating skip/splice toast notifications.",
+          description: "Alias for badge=false: disable floating skip/splice toast notifications.",
         },
         fps: { type: "integer", description: "Max frame rate (default: 30)." },
         quality: { type: "integer", description: "JPEG capture quality 10-100 (default: 92)." },
@@ -545,6 +555,23 @@ export const MCP_TOOLS = [
           type: "string",
           description:
             "Optional output video path (e.g. './acceptance.webm') to record the entire batch interaction, saved even if a step fails.",
+        },
+        hud: {
+          type: "boolean",
+          description:
+            "When recordPath is set, whether to display the top-right recording status indicator and prompts (default: true; set false to hide).",
+        },
+        noHud: {
+          type: "boolean",
+          description: "Alias for hud=false when recording a batch.",
+        },
+        noBadge: {
+          type: "boolean",
+          description: "Disable floating start/skip toast prompts when recording a batch.",
+        },
+        label: {
+          type: "string",
+          description: "Optional custom label on the top-right REC indicator when recordPath is set.",
         },
         fps: {
           type: "integer",
@@ -876,8 +903,16 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       }
       if (args.label) cliArgs.push("--label", String(args.label));
       if (args.cleanupInputs) cliArgs.push("--rm");
-      if (args.noHud) cliArgs.push("--no-hud");
-      if (args.noBadge) cliArgs.push("--no-badge");
+      if (args.hud === false || args.noHud) {
+        cliArgs.push("--no-hud");
+      } else if (args.hud === true) {
+        cliArgs.push("--show-hud");
+      }
+      if (args.badge === false || args.noBadge) {
+        cliArgs.push("--no-badge");
+      } else if (args.badge === true) {
+        cliArgs.push("--show-badge");
+      }
       if (args.fps !== undefined) cliArgs.push("--fps", String(args.fps));
       if (args.quality !== undefined) {
         cliArgs.push("--quality", String(args.quality));
@@ -936,6 +971,13 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
       if (args.target) cliArgs.push("--target", String(args.target));
       if (args.continueOnError) cliArgs.push("--continue-on-error");
       if (args.recordPath) cliArgs.push("--record", String(args.recordPath));
+      if (args.hud === false || args.noHud) {
+        cliArgs.push("--no-hud");
+      } else if (args.hud === true) {
+        cliArgs.push("--show-hud");
+      }
+      if (args.noBadge) cliArgs.push("--no-badge");
+      if (args.label) cliArgs.push("--label", String(args.label));
       if (args.fps !== undefined) cliArgs.push("--fps", String(args.fps));
       stdinText = JSON.stringify(args.steps || []);
       outerTimeoutMs = Math.max(

@@ -173,6 +173,8 @@ cdp status      # 只读查看连接状态、PID、转发计数与活跃会话�
 > - `--no-diag` / `--diag-log <path>`：跳过本次遥测写入，或指定诊断日志输出路径
 > - `--cursor <fast|demo|persist|off>` / `--no-cursor`：切换或关闭虚拟鼠标指针叠加模式
 > - `--with-cursor` / `--keep-cursor`：截图时保留并还原虚拟鼠标指针、角标与焦点高亮框
+> - `--hud <on|off>` / `--no-hud`：开启或关闭录屏时右上角 `REC` 状态胶囊与浮现提示（默认开启，也可设环境变量 `CDP_RECORD_HUD=0` 全局关闭）
+> - `--badge <on|off>` / `--no-badge`：仅开启或关闭开录/暂停/恢复/拼接处的浮现 Toast 提示（默认开启，也可设 `CDP_RECORD_BADGE=0`）
 > - `--raw`：对 `eval` / `text` 直接输出纯值或纯文本，省去外层 JSON 包装
 > - `-c, --compact`：输出单行紧凑 JSON
 
@@ -238,8 +240,9 @@ cdp screenshot 426B5451 ./pointer-state.png --with-cursor
 cdp shot 426B5451 ./dialog.png --selector "[role='dialog']" --keep-cursor
 cdp screenshot 426B5451 ./full.webp --full-page --format webp --quality 85
 
-# 操作过程录屏（别名：record / page-record / screencast；右上角自带 ● REC 计时与跳过等待浮现提示）
+# 操作过程录屏（别名：record / page-record / screencast；默认显示右上角高透明 ● REC 状态与跳过等待浮现提示，传 --no-hud 或设 CDP_RECORD_HUD=0 可关闭）
 cdp record start 426B5451 ./acceptance.webm
+cdp record start 426B5451 ./clean-demo.webm --no-hud  # 关闭右上角一切录制状态与浮现提示（等价于 --hud off）
 # ... 执行阶段 1 操作 ...
 cdp record pause 426B5451                             # 暂停采帧（长等待期间 0 存储占用，状态变更为 ⏸ PAUSED）
 cdp wait 426B5451 ".result-ready" --timeout 180000    # 等待慢接口/推理完成
@@ -351,6 +354,8 @@ cdp raw Target.activateTarget --params '{"targetId":"426B54510000000000000000000
 | `CDP_NO_WMI_BREAKAWAY` | 未启用 (`0`) | 原生 Windows 下设为 `1` 时禁用 WMI 脱离 Job Object 拉起，回退普通 `detached` 启动 |
 | `CDP_CURSOR` | `fast` | 虚拟指针模式：`fast`（0 延迟，空闲 2.6s 淡出）、`persist`（常驻悬停）、`demo`（180ms 慢动作）、`off` / `0`（关闭） |
 | `CDP_SCREENSHOT_CURSOR` | 未启用 (`0`) | 设为 `1` 时截图默认保留并还原模拟指针、角标与焦点高亮框 |
+| `CDP_RECORD_HUD` | `on` (`1`) | 录屏右上角状态胶囊与浮现提示总开关；设为 `0` / `off` / `false` 时全局隐藏（单次可用 `--show-hud` 覆盖） |
+| `CDP_RECORD_BADGE` | `on` (`1`) | 设为 `0` / `off` / `false` 时保留 `● REC` 胶囊、仅隐藏开录/跳过等待/拼接浮现 Toast |
 | `CDP_DIAG` | 启用 (`1`) | 设为 `0` / `off` 时全局关闭 `logs/diag.jsonl` 调用遥测记录 |
 | `CDP_DIAG_LOG` | `<repo>/logs/diag.jsonl` | 自定义工具调用诊断日志文件路径 |
 

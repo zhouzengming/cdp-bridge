@@ -95,11 +95,11 @@ EOF
 
 ### 4. 功能演示与端到端测试验收录屏（`record` / `pause` / `resume` / `concat`）
 
-> 零第三方依赖、无需 `ffmpeg` 直接生成 1:1 高清 `.webm`（VP9/VP8）视频。录制时右上角自动展示半透明 `● REC` 计时胶囊，暂停/恢复或分段拼接处自动浮现 `⏭ 已跳过等待 / 衔接片段` 提示（可通过 `--no-hud` / `--no-badge` 关闭）。
+> 零第三方依赖、无需 `ffmpeg` 直接生成 1:1 高清 `.webm`（VP9/VP8）视频。录制时默认在右上角展示高透明 `● REC` 计时胶囊，并在暂停/恢复或分段拼接处浮现 `⏭ 已跳过等待 / 衔接片段` 提示；如需纯净画面，可通过 `--no-hud`（或 `--hud off`、环境变量 `CDP_RECORD_HUD=0`、MCP 参数 `hud: false`）关闭右上角全部提示，或通过 `--no-badge` 仅关闭浮现 Toast。
 
 ```bash
 # 方式 A：单次录制 + pause/resume 跳过中间长等待（等待期间 0 采帧、0 存储消耗，推荐！）
-cdp record start 426B5451 ./acceptance.webm
+cdp record start 426B5451 ./acceptance.webm                  # 默认开启右上角提示；加 --no-hud 可关闭
 cdp fill 426B5451 ".ProseMirror" "执行端到端验收测试"
 cdp click 426B5451 "button[aria-label='发送']"
 cdp record pause 426B5451                                    # 暂停采帧（显示 ⏸ PAUSED）
