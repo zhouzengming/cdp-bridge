@@ -311,7 +311,10 @@ test("buildNormalizedFramePlan normalizes VFR timestamps and synthesizes final h
 
 test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record failure recovery, and MCP cdp_record", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cdp-rec-e2e-"));
-  const sockPath = path.join(tmpDir, "bridge.sock");
+  const sockPath =
+    process.platform === "win32"
+      ? `\\\\.\\pipe\\cdp-rec-e2e-${process.pid}-${Date.now()}`
+      : path.join(tmpDir, "bridge.sock");
   const logPath = path.join(tmpDir, "bridge.log");
   const activeRecFile = path.join(tmpDir, "active-recordings.json");
 
@@ -509,7 +512,11 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
       logPath,
     ],
     {
-      env: { ...process.env, CDP_DIAG: "0" },
+      env: {
+        ...process.env,
+        CDP_BRIDGE_STATE_DIR: tmpDir,
+        CDP_DIAG: "0",
+      },
       stdio: "ignore",
     },
   );
@@ -523,6 +530,7 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
           env: {
             ...process.env,
             CDP_BRIDGE_SOCKET: sockPath,
+            CDP_BRIDGE_STATE_DIR: tmpDir,
             CDP_DIAG: "0",
             CDP_NO_AUTO_START: "1",
           },
@@ -695,6 +703,7 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
       {
         envOverrides: {
           CDP_BRIDGE_SOCKET: sockPath,
+          CDP_BRIDGE_STATE_DIR: tmpDir,
           CDP_DIAG: "0",
           CDP_NO_AUTO_START: "1",
         },
