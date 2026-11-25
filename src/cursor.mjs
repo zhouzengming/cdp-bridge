@@ -37,6 +37,71 @@ export function resolveCursorMode(flags = {}) {
   return "fast";
 }
 
+function parseOverlayToggle(val) {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "boolean") return val;
+  const norm = String(val).trim().toLowerCase();
+  if (!norm) return undefined;
+  if (
+    norm === "0" ||
+    norm === "false" ||
+    norm === "off" ||
+    norm === "none" ||
+    norm === "no" ||
+    norm === "hide"
+  ) {
+    return false;
+  }
+  if (
+    norm === "1" ||
+    norm === "true" ||
+    norm === "on" ||
+    norm === "yes" ||
+    norm === "show"
+  ) {
+    return true;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve whether the top-right recording status indicator (`hud`) and floating
+ * event/splice toast prompts (`badge`) are enabled.
+ * Defaults to `{ hud: true, badge: true }`; can be disabled via `--no-hud`,
+ * `--hud off`, `CDP_RECORD_HUD=0`, `--no-badge`, `--badge off`, or `CDP_RECORD_BADGE=0`.
+ */
+export function resolveRecordHudOptions(flags = {}, env = process.env) {
+  let hud;
+  if (flags["no-hud"]) {
+    hud = false;
+  } else if (flags["show-hud"]) {
+    hud = true;
+  } else {
+    hud = parseOverlayToggle(flags.hud);
+  }
+  if (hud === undefined) {
+    const envHud = parseOverlayToggle(env.CDP_RECORD_HUD ?? env.CDP_HUD);
+    hud = envHud !== undefined ? envHud : true;
+  }
+
+  let badge;
+  if (!hud) {
+    badge = false;
+  } else if (flags["no-badge"]) {
+    badge = false;
+  } else if (flags["show-badge"]) {
+    badge = true;
+  } else {
+    badge = parseOverlayToggle(flags.badge);
+  }
+  if (badge === undefined) {
+    const envBadge = parseOverlayToggle(env.CDP_RECORD_BADGE);
+    badge = envBadge !== undefined ? envBadge : true;
+  }
+
+  return { hud, badge };
+}
+
 export const CURSOR_HELPER_SOURCE = `(() => {
   const SYM = Symbol.for("cdp.bridge.cursor");
   if (window[SYM] && window[SYM].version === 9) return window[SYM];

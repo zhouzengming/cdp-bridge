@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { dispatchMcpToolCall } from "../mcp/tools.mjs";
+import { resolveRecordHudOptions } from "./cursor.mjs";
 import {
   buildNormalizedFramePlan,
   hasFfmpeg,
@@ -734,6 +735,61 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     assert.equal(fs.existsSync(outWebm), false, "--rm must clean segment 1");
     assert.equal(fs.existsSync(mcpClipWebm), false, "--rm must clean segment 2");
     assert.equal(inspectWebmBuffer(fs.readFileSync(mergedOut)).valid, true);
+
+    // 9) Configurable HUD turn-off (--no-hud / MCP hud: false) suppresses all top-right overlays & toasts
+    pageExpressions.length = 0;
+    const silentWebm = path.join(tmpDir, "silent-no-hud.webm");
+    const silentStart = await runCli([
+      "record",
+      "start",
+      "426B5451",
+      silentWebm,
+      "--no-hud",
+    ]);
+    assert.equal(silentStart.status, 0, silentStart.stderr);
+    assert.equal(JSON.parse(silentStart.stdout).hud, false);
+    const silentPause = await runCli(["record", "pause", "426B5451"]);
+    assert.equal(silentPause.status, 0, silentPause.stderr);
+    const silentResume = await runCli(["record", "resume", "426B5451"]);
+    assert.equal(silentResume.status, 0, silentResume.stderr);
+    const silentStop = await runCli(["record", "stop", "426B5451"]);
+    assert.equal(silentStop.status, 0, silentStop.stderr);
+    assert.equal(
+      pageExpressions.some(
+        (e) => e.includes("setRecordingHud") || e.includes("showRecordingToast"),
+      ),
+      false,
+      "--no-hud must suppress REC pill and all pause/resume toasts",
+    );
+
+    pageExpressions.length = 0;
+    const mcpSilentWebm = path.join(tmpDir, "mcp-silent.webm");
+    const mcpSilentRes = await dispatchMcpToolCall(
+      "cdp_record",
+      {
+        action: "clip",
+        target: "426B5451",
+        outputPath: mcpSilentWebm,
+        durationMs: 80,
+        hud: false,
+      },
+      {
+        envOverrides: {
+          CDP_BRIDGE_SOCKET: sockPath,
+          CDP_BRIDGE_STATE_DIR: tmpDir,
+          CDP_DIAG: "0",
+          CDP_NO_AUTO_START: "1",
+        },
+      },
+    );
+    assert.equal(mcpSilentRes.isError, undefined, JSON.stringify(mcpSilentRes));
+    assert.equal(
+      pageExpressions.some(
+        (e) => e.includes("setRecordingHud") || e.includes("showRecordingToast"),
+      ),
+      false,
+      "MCP cdp_record with hud:false must suppress top-right HUD",
+    );
   } finally {
     await runCli(["stop"]);
     await new Promise((resolve) => {
@@ -749,4 +805,36 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     await mockBrowser.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("resolveRecordHudOptions defaults to enabled and honors CLI flags and environment overrides", () => {
+  assert.deepEqual(resolveRecordHudOptions({}, {}), { hud: true, badge: true });
+  assert.deepEqual(resolveRecordHudOptions({ "no-hud": true }, {}), {
+    hud: false,
+    badge: false,
+  });
+  assert.deepEqual(resolveRecordHudOptions({ hud: "off" }, {}), {
+    hud: false,
+    badge: false,
+  });
+  assert.deepEqual(resolveRecordHudOptions({ hud: "0" }, {}), {
+    hud: false,
+    badge: false,
+  });
+  assert.deepEqual(resolveRecordHudOptions({}, { CDP_RECORD_HUD: "0" }), {
+    hud: false,
+    badge: false,
+  });
+  assert.deepEqual(
+    resolveRecordHudOptions({ "show-hud": true }, { CDP_RECORD_HUD: "0" }),
+    { hud: true, badge: true },
+  );
+  assert.deepEqual(resolveRecordHudOptions({ "no-badge": true }, {}), {
+    hud: true,
+    badge: false,
+  });
+  assert.deepEqual(resolveRecordHudOptions({}, { CDP_RECORD_BADGE: "off" }), {
+    hud: true,
+    badge: false,
+  });
 });

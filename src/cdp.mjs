@@ -6,7 +6,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CURSOR_HELPER_SOURCE, resolveCursorMode } from "./cursor.mjs";
+import {
+  CURSOR_HELPER_SOURCE,
+  resolveCursorMode,
+  resolveRecordHudOptions,
+} from "./cursor.mjs";
 import { recordCliInvocation, runDiagCommand } from "./diag.mjs";
 import {
   concatRecordingVideos,
@@ -331,6 +335,30 @@ function extractLeadingGlobalFlags(argv) {
     } else if (arg.startsWith("--cursor=")) {
       globalFlags.cursor = arg.slice("--cursor=".length);
       idx += 1;
+    } else if (arg === "--no-hud") {
+      globalFlags["no-hud"] = true;
+      idx += 1;
+    } else if (arg === "--show-hud") {
+      globalFlags["show-hud"] = true;
+      idx += 1;
+    } else if (arg === "--hud" && idx + 1 < argv.length) {
+      globalFlags.hud = argv[idx + 1];
+      idx += 2;
+    } else if (arg.startsWith("--hud=")) {
+      globalFlags.hud = arg.slice("--hud=".length);
+      idx += 1;
+    } else if (arg === "--no-badge") {
+      globalFlags["no-badge"] = true;
+      idx += 1;
+    } else if (arg === "--show-badge") {
+      globalFlags["show-badge"] = true;
+      idx += 1;
+    } else if (arg === "--badge" && idx + 1 < argv.length) {
+      globalFlags.badge = argv[idx + 1];
+      idx += 2;
+    } else if (arg.startsWith("--badge=")) {
+      globalFlags.badge = arg.slice("--badge=".length);
+      idx += 1;
     } else if (arg === "--diag-log" && idx + 1 < argv.length) {
       diagLogOverride = argv[idx + 1];
       idx += 2;
@@ -365,6 +393,10 @@ function parseFlags(args, booleanFlags = [], globalDefaults = {}) {
     "with-cursor",
     "keep-cursor",
     "show-cursor",
+    "no-hud",
+    "show-hud",
+    "no-badge",
+    "show-badge",
     ...booleanFlags,
   ]);
   const flags = { ...globalDefaults };
@@ -3255,6 +3287,8 @@ Global Options (accepted before or after <command>):
   --cursor <fast|demo|persist|off>        Visual pointer overlay mode (default: fast; fades out smoothly on user takeover)
   --no-cursor                             Disable visual pointer overlay on click/fill/hover
   --with-cursor, --keep-cursor            Retain/restore simulated pointer state & highlight in screenshot
+  --hud <on|off> | --no-hud               Show/hide top-right recording indicator & prompts (default: on; env: CDP_RECORD_HUD=0)
+  --badge <on|off> | --no-badge           Show/hide floating skip/splice toast prompts only (default: on; env: CDP_RECORD_BADGE=0)
   --raw                                   Print raw value/text directly without JSON envelope (for eval / text)
   -c, --compact                           Print compact single-line JSON output`;
 }
@@ -3268,6 +3302,8 @@ async function startPageRecording(targetQuery, outPathArg, flags = {}) {
       : fps > 0 && fps < 30
         ? Math.max(1, Math.round(30 / fps))
         : 1;
+
+  const { hud: showHud, badge: showBadge } = resolveRecordHudOptions(flags);
 
   const started = await requestBridge(
     {
@@ -3283,30 +3319,38 @@ async function startPageRecording(targetQuery, outPathArg, flags = {}) {
         maxDurationMs:
           flags["max-duration"] !== undefined ? Number(flags["max-duration"]) : 180_000,
         focus: !flags["no-focus"],
-        hud: !flags["no-hud"],
-        badge: !flags["no-badge"],
+        hud: showHud,
+        badge: showBadge,
         label: typeof flags.label === "string" ? flags.label : undefined,
       },
     },
     resolveTimeoutMs(flags, 20_000),
   );
   // Graceful HUD fallback if connected to an older pre-v1.7 daemon in memory
-  if (started.hud === undefined && !flags["no-hud"]) {
+  if (started.hud === undefined) {
     const page = await resolvePage(started.targetId || targetQuery).catch(() => null);
     if (page) {
-      const lbl = typeof flags.label === "string" ? flags.label : "";
-      const showToast = !flags["no-badge"];
-      await evaluateInPage(
-        page,
-        `(() => {
-          const h = (${CURSOR_HELPER_SOURCE});
-          h.setRecordingHud({ state: "rec", elapsedBaseMs: 0, label: ${JSON.stringify(lbl)} });
-          if (${JSON.stringify(showToast)}) h.showRecordingToast("● 开始录制验收画面", 2000);
-          return true;
-        })()`,
-        { awaitPromise: false, timeoutMs: 3_000 },
-      ).catch(() => {});
+      if (showHud) {
+        const lbl = typeof flags.label === "string" ? flags.label : "";
+        await evaluateInPage(
+          page,
+          `(() => {
+            const h = (${CURSOR_HELPER_SOURCE});
+            h.setRecordingHud({ state: "rec", elapsedBaseMs: 0, label: ${JSON.stringify(lbl)} });
+            if (${JSON.stringify(showBadge)}) h.showRecordingToast("● 开始录制验收画面", 2000);
+            return true;
+          })()`,
+          { awaitPromise: false, timeoutMs: 3_000 },
+        ).catch(() => {});
+      } else {
+        await evaluateInPage(
+          page,
+          `(() => { try { (${CURSOR_HELPER_SOURCE}).clearRecordingHud(); } catch {} return true; })()`,
+          { awaitPromise: false, timeoutMs: 2_500 },
+        ).catch(() => {});
+      }
     }
+    return { ...started, hud: showHud, badge: showBadge };
   }
   return started;
 }
@@ -3433,12 +3477,17 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
         }
         if (cmd === "record-pause" || cmd === "pause-record") {
           const pauseTarget = recordingTargetId || currentPage?.targetId;
+          const batchHud = resolveRecordHudOptions(recordFlags);
+          const disableHud = step.hud === false || Boolean(step.noHud) || !batchHud.hud;
+          const enableBadge =
+            !disableHud && step.badge !== false && !step.noBadge && batchHud.badge;
           const pr = await requestBridge({
             id: 1,
             method: "bridge.record.pause",
             params: {
               ...(pauseTarget ? { targetId: pauseTarget } : {}),
-              badge: step.badge !== false,
+              ...(disableHud ? { hud: false } : {}),
+              badge: enableBadge,
             },
           });
           results.push({ index: i, cmd, ok: true, ...pr });
@@ -3446,12 +3495,17 @@ async function runBatchSteps(defaultTarget, stepsInput, options = {}) {
         }
         if (cmd === "record-resume" || cmd === "resume-record") {
           const resumeTarget = recordingTargetId || currentPage?.targetId;
+          const batchHud = resolveRecordHudOptions(recordFlags);
+          const disableHud = step.hud === false || Boolean(step.noHud) || !batchHud.hud;
+          const enableBadge =
+            !disableHud && step.badge !== false && !step.noBadge && batchHud.badge;
           const rr = await requestBridge({
             id: 1,
             method: "bridge.record.resume",
             params: {
               ...(resumeTarget ? { targetId: resumeTarget } : {}),
-              badge: step.badge !== false,
+              ...(disableHud ? { hud: false } : {}),
+              badge: enableBadge,
               toastText: step.label || step.toastText,
             },
           });
@@ -4155,13 +4209,15 @@ async function main() {
     if (subcmd === "pause") {
       const { targetQuery } = takeTargetArg(subPositional, flags);
       if (targetQuery) diagTelemetry.targetQuery = targetQuery;
+      const { hud: showHud, badge: showBadge } = resolveRecordHudOptions(flags);
       const data = await requestBridge(
         {
           id: 1,
           method: "bridge.record.pause",
           params: {
             ...(targetQuery ? { targetId: targetQuery } : {}),
-            badge: !flags["no-badge"],
+            ...(!showHud ? { hud: false } : {}),
+            badge: showBadge,
           },
         },
         resolveTimeoutMs(flags, 10_000),
@@ -4172,14 +4228,16 @@ async function main() {
     if (subcmd === "resume") {
       const { targetQuery } = takeTargetArg(subPositional, flags);
       if (targetQuery) diagTelemetry.targetQuery = targetQuery;
+      const { hud: showHud, badge: showBadge } = resolveRecordHudOptions(flags);
       const data = await requestBridge(
         {
           id: 1,
           method: "bridge.record.resume",
           params: {
             ...(targetQuery ? { targetId: targetQuery } : {}),
+            ...(!showHud ? { hud: false } : {}),
             focus: Boolean(flags.focus),
-            badge: !flags["no-badge"],
+            badge: showBadge,
             toastText: typeof flags.label === "string" ? flags.label : undefined,
           },
         },
@@ -4196,19 +4254,19 @@ async function main() {
       }
       if (inputs.length < 2) {
         throw new Error(
-          "Usage: cdp record concat <seg1.webm> <seg2.webm> [...more] -o <merged.webm> [--rm] [--no-badge]",
+          "Usage: cdp record concat <seg1.webm> <seg2.webm> [...more] -o <merged.webm> [--rm] [--no-hud | --no-badge]",
         );
       }
-      const optionalBridge =
-        flags["no-badge"] || flags["no-hud"]
-          ? null
-          : (payload, tMs) =>
-              requestBridge(payload, tMs, { allowAutoStart: false });
+      const { badge: showConcatBadge } = resolveRecordHudOptions(flags);
+      const optionalBridge = !showConcatBadge
+        ? null
+        : (payload, tMs) =>
+            requestBridge(payload, tMs, { allowAutoStart: false });
       const data = await concatRecordingVideos(
         inputs,
         {
           outputPath: concatOut,
-          showBadge: !flags["no-badge"] && !flags["no-hud"],
+          showBadge: showConcatBadge,
           badgeLabel: typeof flags.label === "string" ? flags.label : undefined,
           cleanupInputs: Boolean(flags.rm || flags.cleanup),
           timeoutMs: resolveTimeoutMs(flags, 90_000),

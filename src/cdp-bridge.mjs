@@ -1256,6 +1256,7 @@ async function serveBridge() {
           title: rec.title,
           url: rec.url,
           outputPath: rec.outputPath,
+          hud: rec.showHud,
           paused: rec.paused,
           pauseCount: rec.pauseCount,
           pausedTotalMs: curPausedMs,
@@ -1289,7 +1290,15 @@ async function serveBridge() {
         Math.min(600_000, Number(params.maxDurationMs) || 180_000),
       );
       const maxFrames = Math.max(10, Math.min(10_000, Number(params.maxFrames) || 3600));
-      const showHud = params.hud !== false;
+      const envHudOff = /^(0|false|off|none|no|hide)$/i.test(
+        String(process.env.CDP_RECORD_HUD ?? process.env.CDP_HUD ?? "").trim(),
+      );
+      const envBadgeOff = /^(0|false|off|none|no|hide)$/i.test(
+        String(process.env.CDP_RECORD_BADGE ?? "").trim(),
+      );
+      const showHud = params.hud !== undefined ? Boolean(params.hud) : !envHudOff;
+      const showBadge =
+        showHud && (params.badge !== undefined ? Boolean(params.badge) : !envBadgeOff);
       const label = params.label ? String(params.label) : "";
 
       const rec = {
@@ -1308,6 +1317,7 @@ async function serveBridge() {
         remainingMaxMs: maxDurationMs,
         maxFrames,
         showHud,
+        showBadge,
         label,
         hudScriptIdentifier: null,
         startedAtMs: Date.now(),
@@ -1362,7 +1372,7 @@ async function serveBridge() {
             state: "rec",
             elapsedBaseMs: 0,
             label,
-            toastText: params.badge === false ? "" : "● 开始录制验收画面",
+            toastText: showBadge ? "● 开始录制验收画面" : "",
           });
         }
 
@@ -1460,12 +1470,21 @@ async function serveBridge() {
       await forwardBrowserCommand("Page.stopScreencast", {}, rec.sessionId, 5_000).catch(
         () => {},
       );
-      await syncRecordingOverlayInPage(rec, {
-        state: "paused",
-        elapsedBaseMs: activeElapsedMs,
-        label: rec.label,
-        toastText: params.badge === false ? "" : "⏸ 录制已暂停 · 等待中不占存储",
-      });
+      if (params.hud === false && rec.showHud) {
+        await syncRecordingOverlayInPage(rec, { state: "off" });
+        rec.showHud = false;
+        rec.showBadge = false;
+      } else {
+        await syncRecordingOverlayInPage(rec, {
+          state: "paused",
+          elapsedBaseMs: activeElapsedMs,
+          label: rec.label,
+          toastText:
+            rec.showHud && rec.showBadge && params.badge !== false
+              ? "⏸ 录制已暂停 · 等待中不占存储"
+              : "",
+        });
+      }
 
       return {
         paused: true,
@@ -1508,8 +1527,14 @@ async function serveBridge() {
         4_000,
       ).catch(() => {});
 
+      if (params.hud === false && rec.showHud) {
+        await syncRecordingOverlayInPage(rec, { state: "off" });
+        rec.showHud = false;
+        rec.showBadge = false;
+      }
+
       const skipToast =
-        params.badge === false
+        !rec.showHud || !rec.showBadge || params.badge === false
           ? ""
           : params.toastText
             ? String(params.toastText)
