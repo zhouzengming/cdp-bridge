@@ -104,7 +104,7 @@ export function resolveRecordHudOptions(flags = {}, env = process.env) {
 
 export const CURSOR_HELPER_SOURCE = `(() => {
   const SYM = Symbol.for("cdp.bridge.cursor");
-  if (window[SYM] && window[SYM].version === 9) return window[SYM];
+  if (window[SYM] && window[SYM].version === 10) return window[SYM];
   const prevRecHud =
     window[SYM] && typeof window[SYM].getRecordingHudState === "function"
       ? window[SYM].getRecordingHudState()
@@ -133,7 +133,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
 
   let flightX = null;
   let flightY = null;
-  let lastActionState = null; // { x, y, label, color, rect }
+  let lastActionState = null; // { x, y, label, color, rect, href, targetRef, elInitialRect }
+  let activeRouteHref = typeof location !== "undefined" ? String(location.href || "") : "";
   let idleTimer = null;
   let hideLayerTimer = null;
   let renderGen = 0;
@@ -144,6 +145,92 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   let listenersBound = false;
 
   const listenerOpts = { capture: true, passive: true };
+
+  function isNodeRenderedInViewport(node) {
+    if (!node || !node.isConnected) return false;
+    if (typeof window.getComputedStyle === "function") {
+      const st = window.getComputedStyle(node);
+      if (st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) {
+        return false;
+      }
+    }
+    if (typeof node.getBoundingClientRect !== "function") return false;
+    const r = node.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const vw = window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0) || 0;
+    const vh = window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0) || 0;
+    if (vw > 0 && vh > 0) {
+      if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function buildActionTargetMeta(targetEl) {
+    const href = typeof location !== "undefined" ? String(location.href || "") : "";
+    const trackable =
+      targetEl &&
+      targetEl !== document.body &&
+      targetEl !== document.documentElement &&
+      typeof targetEl.getBoundingClientRect === "function";
+    if (!trackable) {
+      return { href, targetRef: null, elInitialRect: null };
+    }
+    const er = targetEl.getBoundingClientRect();
+    return {
+      href,
+      targetRef: typeof WeakRef === "function" ? new WeakRef(targetEl) : null,
+      elInitialRect: { left: er.left, top: er.top, width: er.width, height: er.height }
+    };
+  }
+
+  function clearTransientOverlays(opts = {}) {
+    const hideCursor = opts.hideCursor !== false;
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (hideLayerTimer) {
+      clearTimeout(hideLayerTimer);
+      hideLayerTimer = null;
+    }
+    renderGen += 1;
+    if (pinnedHighlightEl) {
+      try { pinnedHighlightEl.remove(); } catch {}
+      pinnedHighlightEl = null;
+    }
+    if (dragTrailEl) {
+      try { dragTrailEl.remove(); } catch {}
+      dragTrailEl = null;
+      dragLineGlowEl = null;
+      dragLineDashEl = null;
+    }
+    if (layerEl) {
+      for (const child of Array.from(layerEl.children)) {
+        if (child === cursorEl) continue;
+        try { child.remove(); } catch {}
+      }
+    }
+    if (hideCursor) {
+      visible = false;
+      flightX = null;
+      flightY = null;
+      if (cursorEl) {
+        try { cursorEl.getAnimations().forEach((a) => a.cancel()); } catch {}
+        cursorEl.style.opacity = "0";
+      }
+    }
+  }
+
+  function onRouteCheck() {
+    const curHref = typeof location !== "undefined" ? String(location.href || "") : "";
+    if (curHref === activeRouteHref) return false;
+    activeRouteHref = curHref;
+    lastActionState = null;
+    clearTransientOverlays({ hideCursor: true });
+    return true;
+  }
 
   function extendSimGuard(ms = 120) {
     const until = performance.now() + ms;
@@ -161,6 +248,11 @@ export const CURSOR_HELPER_SOURCE = `(() => {
     listenersBound = true;
     window.addEventListener("pointerdown", onUserClickTakeover, listenerOpts);
     window.addEventListener("mousedown", onUserClickTakeover, listenerOpts);
+    window.addEventListener("popstate", onRouteCheck, listenerOpts);
+    window.addEventListener("hashchange", onRouteCheck, listenerOpts);
+    if (window.navigation && typeof window.navigation.addEventListener === "function") {
+      try { window.navigation.addEventListener("currententrychange", onRouteCheck); } catch {}
+    }
   }
 
   function unbindUserTakeoverListeners() {
@@ -168,6 +260,11 @@ export const CURSOR_HELPER_SOURCE = `(() => {
     listenersBound = false;
     window.removeEventListener("pointerdown", onUserClickTakeover, listenerOpts);
     window.removeEventListener("mousedown", onUserClickTakeover, listenerOpts);
+    window.removeEventListener("popstate", onRouteCheck, listenerOpts);
+    window.removeEventListener("hashchange", onRouteCheck, listenerOpts);
+    if (window.navigation && typeof window.navigation.removeEventListener === "function") {
+      try { window.navigation.removeEventListener("currententrychange", onRouteCheck); } catch {}
+    }
   }
 
   function dismissForUserTakeover() {
@@ -237,6 +334,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   }
 
   function ensureMounted() {
+    onRouteCheck();
     const docEl = document.documentElement;
     if (!docEl) return false;
     bindUserTakeoverListeners();
@@ -810,7 +908,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
   }
 
   const api = {
-    version: 9,
+    version: 10,
     destroy() {
       unbindUserTakeoverListeners();
       if (idleTimer) clearTimeout(idleTimer);
@@ -891,7 +989,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         dragLineDashEl.setAttribute("y2", String(curY));
       }
     },
-    finishDrag(toX, toY, fromX, fromY, toRect = null, persist = false) {
+    finishDrag(toX, toY, fromX, fromY, toRect = null, persist = false, toEl = null) {
       if (!ensureMounted() || suspended) return;
       extendSimGuard(320);
       const cleanRect = toRect
@@ -899,6 +997,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         : null;
       const dist = Math.round(Math.hypot(toX - fromX, toY - fromY));
       const label = dist > 0 ? "Drag " + dist + "px" : "Drag";
+      const targetMeta = buildActionTargetMeta(toEl);
+      const targetStillRendered = !toEl || isNodeRenderedInViewport(toEl);
       lastActionState = {
         kind: "drag",
         fromX,
@@ -908,8 +1008,9 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         label,
         color: "rgba(79,70,229,0.92)",
         boxColor: "rgba(99,102,241,0.56)",
-        rect: cleanRect,
-        persist
+        rect: targetStillRendered ? cleanRect : null,
+        persist,
+        ...targetMeta
       };
       flightX = toX;
       flightY = toY;
@@ -922,7 +1023,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         badgeEl.textContent = label;
       }
       spawnRipple(toX, toY, "rgba(99,102,241,0.54)");
-      if (cleanRect) {
+      if (cleanRect && targetStillRendered) {
         spawnHighlightBox(cleanRect, "rgba(99,102,241,0.52)", 540);
       }
       if (dragTrailEl) {
@@ -942,9 +1043,11 @@ export const CURSOR_HELPER_SOURCE = `(() => {
       }
       scheduleIdleFade(persist);
     },
-    moveForClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false) {
+    moveForClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false, targetEl = null) {
+      onRouteCheck();
       extendSimGuard(guardMs + flightMs);
       const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+      const targetMeta = buildActionTargetMeta(targetEl);
       lastActionState = {
         kind: "click",
         x,
@@ -953,18 +1056,31 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         color: "rgba(37,99,235,0.92)",
         boxColor: "rgba(56,189,248,0.55)",
         rect: cleanRect,
-        persist
+        persist,
+        ...targetMeta
       };
       moveCursor(x, y, "Click", "rgba(37,99,235,0.92)", flightMs, persist);
+      return { href: activeRouteHref };
     },
-    triggerClickImpact(x, y, rect) {
+    triggerClickImpact(x, y, rect, expectedHref = "", targetEl = null) {
+      const curHref = typeof location !== "undefined" ? String(location.href || "") : "";
+      if (onRouteCheck() || (expectedHref && curHref !== expectedHref)) {
+        lastActionState = null;
+        clearTransientOverlays({ hideCursor: true });
+        return;
+      }
       if (!ensureMounted() || suspended) return;
       const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
       if (document.querySelector("dialog[open], [popover]:not([data-cdp-bridge-overlay])")) {
         promoteTopLayer();
       }
       spawnRipple(x, y, "rgba(56,189,248,0.58)");
-      if (cleanRect) spawnHighlightBox(cleanRect, "rgba(56,189,248,0.48)", 480);
+      const targetStillRendered = !targetEl || isNodeRenderedInViewport(targetEl);
+      if (cleanRect && targetStillRendered) {
+        spawnHighlightBox(cleanRect, "rgba(56,189,248,0.48)", 480);
+      } else if (!targetStillRendered && lastActionState) {
+        lastActionState.rect = null;
+      }
       if (cursorEl) {
         try {
           cursorEl.animate(
@@ -978,17 +1094,19 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         } catch {}
       }
     },
-    showClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false) {
-      this.moveForClick(x, y, rect, flightMs, guardMs, persist);
-      this.triggerClickImpact(x, y, rect);
+    showClick(x, y, rect, flightMs = 110, guardMs = 220, persist = false, targetEl = null) {
+      const meta = this.moveForClick(x, y, rect, flightMs, guardMs, persist, targetEl);
+      this.triggerClickImpact(x, y, rect, meta ? meta.href : "", targetEl);
     },
     moveForFill(el, label = "Fill", flightMs = 140, guardMs = 240, persist = false) {
       if (!el) return null;
+      onRouteCheck();
       extendSimGuard(guardMs + flightMs);
       const r = el.getBoundingClientRect();
       const cleanRect = { left: r.left, top: r.top, width: r.width, height: r.height };
       const x = Math.round(r.left + Math.min(24, Math.max(10, r.width / 2)));
       const y = Math.round(r.top + Math.min(20, Math.max(10, r.height / 2)));
+      const targetMeta = buildActionTargetMeta(el);
       lastActionState = {
         kind: "fill",
         x,
@@ -997,16 +1115,26 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         color: "rgba(16,185,129,0.92)",
         boxColor: "rgba(16,185,129,0.65)",
         rect: cleanRect,
-        persist
+        persist,
+        ...targetMeta
       };
       moveCursor(x, y, label, "rgba(16,185,129,0.92)", flightMs, persist);
-      return { x, y, cleanRect };
+      return { x, y, cleanRect, href: activeRouteHref, targetEl: el };
     },
     triggerFillImpact(pos) {
+      const curHref = typeof location !== "undefined" ? String(location.href || "") : "";
+      if (onRouteCheck() || (pos && pos.href && curHref !== pos.href)) {
+        lastActionState = null;
+        clearTransientOverlays({ hideCursor: true });
+        return;
+      }
       if (!pos || !ensureMounted() || suspended) return;
       spawnRipple(pos.x, pos.y, "rgba(16,185,129,0.52)");
-      if (pos.cleanRect) {
+      const targetStillRendered = !pos.targetEl || isNodeRenderedInViewport(pos.targetEl);
+      if (pos.cleanRect && targetStillRendered) {
         spawnHighlightBox(pos.cleanRect, "rgba(16,185,129,0.58)", 620);
+      } else if (!targetStillRendered && lastActionState) {
+        lastActionState.rect = null;
       }
       if (cursorEl) {
         try {
@@ -1025,9 +1153,11 @@ export const CURSOR_HELPER_SOURCE = `(() => {
       const pos = this.moveForFill(el, label, flightMs, guardMs, persist);
       this.triggerFillImpact(pos);
     },
-    showHover(x, y, rect = null, flightMs = 160, guardMs = 160, persist = true) {
+    showHover(x, y, rect = null, flightMs = 160, guardMs = 160, persist = true, targetEl = null) {
+      onRouteCheck();
       extendSimGuard(guardMs);
       const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+      const targetMeta = buildActionTargetMeta(targetEl);
       lastActionState = {
         kind: "hover",
         x,
@@ -1036,17 +1166,20 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         color: "rgba(245,158,11,0.94)",
         boxColor: "rgba(245,158,11,0.85)",
         rect: cleanRect,
-        persist
+        persist,
+        ...targetMeta
       };
       moveCursor(x, y, "Hover", "rgba(245,158,11,0.94)", flightMs, persist);
-      if (!suspended && cleanRect) {
+      if (!suspended && cleanRect && (!targetEl || isNodeRenderedInViewport(targetEl))) {
         spawnHighlightBox(cleanRect, "rgba(245,158,11,0.85)", 600);
       }
     },
-    showScroll(x, y, dx = 0, dy = 0, rect = null, customLabel = "", flightMs = 150, guardMs = 260, persist = false) {
+    showScroll(x, y, dx = 0, dy = 0, rect = null, customLabel = "", flightMs = 150, guardMs = 260, persist = false, targetEl = null) {
+      onRouteCheck();
       extendSimGuard(guardMs);
       const cleanRect = rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
       const label = formatScrollLabel(dx, dy, customLabel);
+      const targetMeta = buildActionTargetMeta(targetEl);
       lastActionState = {
         kind: "scroll",
         x,
@@ -1057,18 +1190,33 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         color: "rgba(124,58,237,0.94)",
         boxColor: "rgba(139,92,246,0.82)",
         rect: cleanRect,
-        persist
+        persist,
+        ...targetMeta
       };
       moveCursor(x, y, label, "rgba(124,58,237,0.94)", flightMs, persist);
       if (!suspended) {
         spawnScrollEffect(x, y, dx, dy, "#8b5cf6");
-        if (cleanRect) {
+        if (cleanRect && (!targetEl || isNodeRenderedInViewport(targetEl))) {
           spawnHighlightBox(cleanRect, "rgba(139,92,246,0.82)", 620);
         }
       }
       return label;
     },
-    prepareScreenshot(withCursor) {
+    prepareScreenshot(withCursor, options = {}) {
+      onRouteCheck();
+      const isLiveRecording =
+        Boolean(options && options.activelyRecording) ||
+        recHudState.state === "rec";
+      if (isLiveRecording) {
+        if (visible && lastActionState && lastActionState.targetRef) {
+          const liveNode = lastActionState.targetRef.deref();
+          if (!isNodeRenderedInViewport(liveNode)) {
+            clearTransientOverlays({ hideCursor: true });
+            lastActionState = null;
+          }
+        }
+        return { mode: visible ? "live-recording" : "idle-recording" };
+      }
       if (!withCursor) {
         this.setSuspended(true);
         return { mode: "hidden" };
@@ -1076,6 +1224,38 @@ export const CURSOR_HELPER_SOURCE = `(() => {
       this.setSuspended(false);
       if (!lastActionState) {
         return { mode: "none" };
+      }
+      const curHref = typeof location !== "undefined" ? String(location.href || "") : "";
+      if (lastActionState.href && lastActionState.href !== curHref) {
+        lastActionState = null;
+        clearTransientOverlays({ hideCursor: true });
+        return { mode: "stale-route" };
+      }
+      let effX = lastActionState.x;
+      let effY = lastActionState.y;
+      let effRect = lastActionState.rect;
+      if (lastActionState.targetRef) {
+        const liveEl = lastActionState.targetRef.deref();
+        if (!isNodeRenderedInViewport(liveEl)) {
+          lastActionState = null;
+          clearTransientOverlays({ hideCursor: true });
+          return { mode: "stale-target" };
+        }
+        const lr = liveEl.getBoundingClientRect();
+        const initR = lastActionState.elInitialRect;
+        if (initR) {
+          const shiftX = lr.left - initR.left;
+          const shiftY = lr.top - initR.top;
+          effX = Math.round(effX + shiftX);
+          effY = Math.round(effY + shiftY);
+          if (effRect) {
+            if (Math.abs(effRect.width - initR.width) < 2 && Math.abs(effRect.height - initR.height) < 2) {
+              effRect = { left: lr.left, top: lr.top, width: lr.width, height: lr.height };
+            } else {
+              effRect = { left: effRect.left + shiftX, top: effRect.top + shiftY, width: effRect.width, height: effRect.height };
+            }
+          }
+        }
       }
       if (!ensureMounted()) {
         return { mode: "unavailable" };
@@ -1089,7 +1269,7 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         clearTimeout(hideLayerTimer);
         hideLayerTimer = null;
       }
-      const { x, y, label, color, boxColor, rect, kind } = lastActionState;
+      const { label, color, boxColor, kind } = lastActionState;
       layerEl.style.visibility = "visible";
       if (badgeEl) {
         badgeEl.textContent = label || "CDP";
@@ -1099,19 +1279,19 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         cursorEl.getAnimations().forEach((a) => a.cancel());
       } catch {}
       cursorEl.style.opacity = "1";
-      cursorEl.style.transform = "translate3d(" + x + "px," + y + "px,0) scale(1)";
+      cursorEl.style.transform = "translate3d(" + effX + "px," + effY + "px,0) scale(1)";
 
       if (pinnedHighlightEl) {
         pinnedHighlightEl.remove();
         pinnedHighlightEl = null;
       }
-      if (rect && rect.width > 0 && rect.height > 0) {
-        pinnedHighlightEl = createStaticBox(rect, boxColor || "rgba(37,99,235,0.8)");
+      if (effRect && effRect.width > 0 && effRect.height > 0) {
+        pinnedHighlightEl = createStaticBox(effRect, boxColor || "rgba(37,99,235,0.8)");
         pinnedHighlightEl.style.opacity = "0.9";
         layerEl.insertBefore(pinnedHighlightEl, cursorEl);
       }
       if (kind === "drag" && Number.isFinite(lastActionState.fromX) && Number.isFinite(lastActionState.fromY)) {
-        const staticTrail = createDragTrailSvg(lastActionState.fromX, lastActionState.fromY, x, y).svg;
+        const staticTrail = createDragTrailSvg(lastActionState.fromX, lastActionState.fromY, effX, effY).svg;
         if (pinnedHighlightEl) {
           const wrap = document.createElement("div");
           wrap.appendChild(staticTrail);
@@ -1138,8 +1318,8 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         dot.setAttribute("data-pinned-ring", "");
         dot.style.cssText = [
           "position:fixed",
-          "left:" + x + "px",
-          "top:" + y + "px",
+          "left:" + effX + "px",
+          "top:" + effY + "px",
           "width:" + ringSize + "px",
           "height:" + ringSize + "px",
           "margin-left:-" + half + "px",
@@ -1167,9 +1347,15 @@ export const CURSOR_HELPER_SOURCE = `(() => {
         }
       }
       visible = true;
-      return { mode: "restored", x, y, label, kind };
+      return { mode: "restored", x: effX, y: effY, label, kind };
     },
-    finishScreenshot(withCursor) {
+    finishScreenshot(withCursor, options = {}) {
+      const isLiveRecording =
+        Boolean(options && options.activelyRecording) ||
+        recHudState.state === "rec";
+      if (isLiveRecording) {
+        return;
+      }
       if (!withCursor) {
         this.setSuspended(false);
         return;
@@ -1200,11 +1386,16 @@ export const CURSOR_HELPER_SOURCE = `(() => {
       return Boolean(visible && !suspended && host && host.isConnected);
     },
     getState() {
+      let publicAction = null;
+      if (lastActionState) {
+        const { targetRef: _tr, ...rest } = lastActionState;
+        publicAction = rest;
+      }
       return {
         visible: this.isVisible(),
         takenOverByUser,
         inTopLayer: this.isOpenInTopLayer(),
-        lastActionState
+        lastActionState: publicAction
       };
     }
   };

@@ -7,8 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { dispatchMcpToolCall } from "../mcp/tools.mjs";
-import { resolveRecordHudOptions } from "./cursor.mjs";
+import { CURSOR_HELPER_SOURCE, resolveRecordHudOptions } from "./cursor.mjs";
 import {
   buildNormalizedFramePlan,
   hasFfmpeg,
@@ -598,6 +599,24 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     );
     assert.ok(ackedFrameIds.includes(501), "Daemon must send Page.screencastFrameAck");
 
+    // 3b) Screenshot during active recording must signal activelyRecording: true so screencast never flashes a pinned box
+    const midShotPath = path.join(tmpDir, "mid-rec.png");
+    const midShotRes = await runCli([
+      "screenshot",
+      "426B5451",
+      midShotPath,
+      "--with-cursor",
+    ]);
+    assert.equal(midShotRes.status, 0, midShotRes.stderr);
+    assert.ok(
+      pageExpressions.some(
+        (e) =>
+          e.includes("prepareScreenshot(") &&
+          /activelyRecording:\s*true/.test(e),
+      ),
+      "Screenshot during active recording must pass activelyRecording: true",
+    );
+
     // 4) Pause -> simulated wait -> Resume (verifying HUD toast & time compression)
     const recPause = await runCli(["record", "pause", "426B5451"]);
     assert.equal(recPause.status, 0, recPause.stderr);
@@ -605,6 +624,25 @@ test("End-to-end cdp record start/stop, auto-demo cursor upgrade, batch --record
     assert.ok(
       pageExpressions.some((e) => e.includes("录制已暂停")),
       "Pause should show paused HUD toast in page",
+    );
+
+    // Screenshot while paused behaves like non-recording (`activelyRecording: false`)
+    pageExpressions.length = 0;
+    const pausedShotPath = path.join(tmpDir, "paused-rec.png");
+    const pausedShotRes = await runCli([
+      "screenshot",
+      "426B5451",
+      pausedShotPath,
+      "--with-cursor",
+    ]);
+    assert.equal(pausedShotRes.status, 0, pausedShotRes.stderr);
+    assert.ok(
+      pageExpressions.some(
+        (e) =>
+          e.includes("prepareScreenshot(") &&
+          /activelyRecording:\s*false/.test(e),
+      ),
+      "Screenshot while paused must pass prepareScreenshot(true, { activelyRecording: false })",
     );
 
     // While paused, scroll runs in default fast mode (`if (false)`) rather than slow-mo
@@ -837,4 +875,240 @@ test("resolveRecordHudOptions defaults to enabled and honors CLI flags and envir
     hud: true,
     badge: false,
   });
+});
+
+test("CURSOR_HELPER_SOURCE v10 tracks element liveness/scroll, clears SPA route residue, and avoids screencast flash", () => {
+  class FakeEl {
+    constructor(tag = "DIV") {
+      this.tagName = tag;
+      this.attrs = new Map();
+      this.children = [];
+      this.parent = null;
+      this.shadowRootNode = null;
+      this.style = { cssText: "" };
+      this.textContent = "";
+      this.popoverOpen = false;
+      this.rect = { left: 0, top: 0, width: 100, height: 32 };
+      this.opacity = "1";
+    }
+    get isConnected() {
+      let cur = this;
+      while (cur) {
+        if (cur === docEl) return true;
+        cur = cur.parent;
+      }
+      return false;
+    }
+    setAttribute(k, v) {
+      this.attrs.set(String(k), String(v));
+    }
+    getAttribute(k) {
+      return this.attrs.get(String(k)) ?? null;
+    }
+    appendChild(child) {
+      if (child.parent) child.remove();
+      child.parent = this;
+      this.children.push(child);
+      return child;
+    }
+    insertBefore(child, ref) {
+      if (child.parent) child.remove();
+      child.parent = this;
+      const idx = ref ? this.children.indexOf(ref) : -1;
+      if (idx === -1) this.children.push(child);
+      else this.children.splice(idx, 0, child);
+      return child;
+    }
+    remove() {
+      if (!this.parent) return;
+      const arr = this.parent.children;
+      const i = arr.indexOf(this);
+      if (i !== -1) arr.splice(i, 1);
+      this.parent = null;
+    }
+    set innerHTML(v) {
+      if (v === "") {
+        for (const c of this.children.slice()) c.parent = null;
+        this.children.length = 0;
+      }
+    }
+    attachShadow() {
+      const sr = new FakeEl("#shadow-root");
+      sr.parent = this;
+      this.shadowRootNode = sr;
+      return sr;
+    }
+    showPopover() {
+      this.popoverOpen = true;
+    }
+    hidePopover() {
+      this.popoverOpen = false;
+    }
+    matches(sel) {
+      return sel === ":popover-open" ? this.popoverOpen : false;
+    }
+    animate() {
+      return { onfinish: null, cancel() {} };
+    }
+    getAnimations() {
+      return [];
+    }
+    getBoundingClientRect() {
+      return {
+        left: this.rect.left,
+        top: this.rect.top,
+        width: this.rect.width,
+        height: this.rect.height,
+        right: this.rect.left + this.rect.width,
+        bottom: this.rect.top + this.rect.height,
+      };
+    }
+  }
+
+  const docEl = new FakeEl("HTML");
+  docEl.clientWidth = 1280;
+  docEl.clientHeight = 720;
+
+  const listeners = new Map();
+  const navListeners = new Map();
+  const locationObj = { href: "http://127.0.0.1:3000/history" };
+
+  const fakeWindow = {
+    innerWidth: 1280,
+    innerHeight: 720,
+    location: locationObj,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    navigation: {
+      addEventListener(type, fn) {
+        if (!navListeners.has(type)) navListeners.set(type, new Set());
+        navListeners.get(type).add(fn);
+      },
+      removeEventListener(type, fn) {
+        navListeners.get(type)?.delete(fn);
+      },
+    },
+    getComputedStyle(node) {
+      return {
+        display: "block",
+        visibility: "visible",
+        opacity: node.opacity ?? "1",
+      };
+    },
+    emit(type) {
+      for (const fn of listeners.get(type) || []) fn({ type });
+      for (const fn of navListeners.get(type) || []) fn({ type });
+    },
+  };
+
+  const sandbox = {
+    window: fakeWindow,
+    document: {
+      documentElement: docEl,
+      body: new FakeEl("BODY"),
+      createElement: (tag) => new FakeEl(tag),
+      createElementNS: (_ns, tag) => new FakeEl(tag),
+      querySelector: () => null,
+    },
+    location: locationObj,
+    performance: { now: () => 1000 },
+    setTimeout,
+    clearTimeout,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    Math,
+    Date,
+    Number,
+    String,
+    Boolean,
+    Array,
+    JSON,
+    Symbol,
+    WeakRef,
+  };
+  fakeWindow.window = fakeWindow;
+
+  const api = vm.runInNewContext(CURSOR_HELPER_SOURCE, sandbox);
+  assert.equal(api.version, 10);
+
+  const getLayer = () => {
+    const host = docEl.children.find(
+      (c) => c.getAttribute("data-cdp-bridge-overlay") !== null,
+    );
+    return host.shadowRootNode.children[0];
+  };
+
+  // 1) Same route + scrolled live target shifts restored cursor & highlight box to new viewport rect
+  const cardBtn = new FakeEl("BUTTON");
+  cardBtn.rect = { left: 100, top: 200, width: 140, height: 40 };
+  docEl.appendChild(cardBtn);
+
+  api.showHover(170, 220, cardBtn.getBoundingClientRect(), 100, 120, false, cardBtn);
+  cardBtn.rect = { left: 100, top: 80, width: 140, height: 40 };
+  const restored = api.prepareScreenshot(true);
+  assert.equal(restored.mode, "restored");
+  assert.equal(restored.x, 170);
+  assert.equal(restored.y, 100);
+  const containsCss = (node, substr) =>
+    String(node.style?.cssText || "").includes(substr) ||
+    node.children.some((ch) => containsCss(ch, substr));
+  assert.ok(
+    getLayer().children.some((c) => containsCss(c, "top:77px")),
+    "Pinned highlight box must track scrolled element top (80 - 3px pad = 77px)",
+  );
+  api.finishScreenshot(true);
+
+  // 2) Unmounted or hidden element must return stale-target and mount zero pinned boxes
+  cardBtn.remove();
+  const staleTargetPrep = api.prepareScreenshot(true);
+  assert.equal(staleTargetPrep.mode, "stale-target");
+  assert.equal(
+    getLayer().children.length,
+    1,
+    "Only cursorEl should remain when element is unmounted",
+  );
+
+  // 3) Synchronous SPA route transition inside click cancels post-click highlight box
+  const navBtn = new FakeEl("BUTTON");
+  navBtn.rect = { left: 200, top: 300, width: 120, height: 36 };
+  docEl.appendChild(navBtn);
+  const clickMeta = api.moveForClick(260, 318, navBtn.getBoundingClientRect(), 100, 120, false, navBtn);
+  locationObj.href = "http://127.0.0.1:3000/replica/123";
+  api.triggerClickImpact(260, 318, navBtn.getBoundingClientRect(), clickMeta.href, navBtn);
+  assert.equal(
+    getLayer().children.length,
+    1,
+    "Sync route change inside click must not leave ripple or 480ms highlight box",
+  );
+  assert.equal(api.prepareScreenshot(true).mode, "none");
+
+  // 4) Async SPA route change (currententrychange/popstate) clears active boxes while preserving REC HUD
+  api.setRecordingHud({ state: "rec", elapsedBaseMs: 1000, label: "Step 1" });
+  const liveBtn = new FakeEl("BUTTON");
+  liveBtn.rect = { left: 300, top: 240, width: 90, height: 36 };
+  docEl.appendChild(liveBtn);
+  api.showHover(345, 258, liveBtn.getBoundingClientRect(), 100, 120, false, liveBtn);
+  assert.ok(getLayer().children.length > 1, "Hover highlight box should be present before route change");
+  locationObj.href = "http://127.0.0.1:3000/history";
+  fakeWindow.emit("currententrychange");
+  assert.equal(getLayer().children.length, 1, "Route change event must strip transient highlight boxes");
+  assert.equal(api.getRecordingHudState()?.state, "rec", "REC HUD must survive route transition");
+
+  // 5) Active recording blocks prepareScreenshot from flashing pinned highlight DOM overlays
+  api.showHover(345, 258, liveBtn.getBoundingClientRect(), 100, 120, false, liveBtn);
+  const beforeRecCount = getLayer().children.length;
+  const recPrep = api.prepareScreenshot(true, { activelyRecording: true });
+  assert.equal(recPrep.mode, "live-recording");
+  assert.equal(
+    getLayer().children.length,
+    beforeRecCount,
+    "prepareScreenshot during active recording must not inject pinnedHighlightEl or ring DOM",
+  );
+  api.finishScreenshot(true, { activelyRecording: true });
+  api.destroy();
 });

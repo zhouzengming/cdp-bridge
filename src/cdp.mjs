@@ -1467,16 +1467,19 @@ async function clickInPage(page, selectorOrText, options = {}) {
     }
 
     let cursorHelper = null;
+    let clickTrackEl = matchedBy === "coords" ? null : el;
+    let clickMeta = null;
     if (${JSON.stringify(cursorMode !== "off")}) {
       try {
         cursorHelper = (${CURSOR_HELPER_SOURCE});
-        cursorHelper.moveForClick(
+        clickMeta = cursorHelper.moveForClick(
           cx,
           cy,
           rect,
           ${cursorMode === "demo" ? 190 : 90},
           ${nativeMouse ? 560 : 280},
-          ${JSON.stringify(cursorMode === "persist")}
+          ${JSON.stringify(cursorMode === "persist")},
+          clickTrackEl
         );
       } catch {}
       if (${JSON.stringify(cursorMode === "demo")}) {
@@ -1515,7 +1518,15 @@ async function clickInPage(page, selectorOrText, options = {}) {
     }
 
     if (cursorHelper && typeof cursorHelper.triggerClickImpact === "function") {
-      try { cursorHelper.triggerClickImpact(cx, cy, rect); } catch {}
+      try {
+        cursorHelper.triggerClickImpact(
+          cx,
+          cy,
+          rect,
+          clickMeta && clickMeta.href ? clickMeta.href : "",
+          clickTrackEl
+        );
+      } catch {}
     }
 
     if (${JSON.stringify(cursorMode === "demo" && !nativeMouse)}) {
@@ -1673,7 +1684,8 @@ async function hoverInPage(page, targetSpec, options = {}) {
           rect,
           ${cursorMode === "demo" ? 220 : 150},
           ${nativeMouse ? 480 : 180},
-          ${JSON.stringify(persist)}
+          ${JSON.stringify(persist)},
+          ${coords ? "null" : "el"}
         );
       } catch {}
     }
@@ -1864,6 +1876,8 @@ async function dragInPage(page, options = {}) {
     const toX = clampX((toPt ? toPt.x : fromPt.x) + offX);
     const toY = clampY((toPt ? toPt.y : fromPt.y) + offY);
     const toRect = toPt && offX === 0 && offY === 0 ? toPt.rect : null;
+    const toEl = toPt && toPt.matchedBy !== "coords" && offX === 0 && offY === 0 ? toPt.el : null;
+    window[Symbol.for("cdp.bridge.dragNodes")] = { dstEl: toEl };
 
     const draggableSource = fromPt.el?.closest?.("[draggable='true']") || (fromPt.el?.draggable ? fromPt.el : null);
     const useHtml5 = ${html5 === true ? "true" : html5 === false ? "false" : "Boolean(draggableSource)"};
@@ -2041,6 +2055,9 @@ async function dragInPage(page, options = {}) {
         }
         delete window[ctxSym];
       }
+      const dragNodesSym = Symbol.for("cdp.bridge.dragNodes");
+      const dragNodes = window[dragNodesSym];
+      delete window[dragNodesSym];
       if (${JSON.stringify(cursorMode !== "off")}) {
         try {
           (${CURSOR_HELPER_SOURCE}).finishDrag(
@@ -2049,7 +2066,8 @@ async function dragInPage(page, options = {}) {
             ${prep.fromX},
             ${prep.fromY},
             ${JSON.stringify(prep.toRect)},
-            ${JSON.stringify(persistCursor)}
+            ${JSON.stringify(persistCursor)},
+            dragNodes ? dragNodes.dstEl : null
           );
         } catch {}
       }
@@ -2358,7 +2376,8 @@ async function scrollInPage(page, options = {}) {
               customLbl,
               ${cursorMode === "demo" ? 220 : 150},
               240,
-              ${JSON.stringify(persistCursor)}
+              ${JSON.stringify(persistCursor)},
+              el
             ) || customLbl;
           } catch {}
           if (${JSON.stringify(cursorMode === "demo")}) {
@@ -2429,7 +2448,8 @@ async function scrollInPage(page, options = {}) {
             customLbl,
             ${cursorMode === "demo" ? 220 : 150},
             240,
-            ${JSON.stringify(persistCursor)}
+            ${JSON.stringify(persistCursor)},
+            (!${JSON.stringify(Boolean(coords))} && el && !isRoot) ? scroller : null
           ) || customLbl;
         } catch {}
         if (${JSON.stringify(cursorMode === "demo")}) {
@@ -2608,7 +2628,8 @@ async function scrollInPage(page, options = {}) {
           "",
           ${cursorMode === "demo" ? 210 : 140},
           ${totalGuardMs},
-          ${JSON.stringify(persistCursor)}
+          ${JSON.stringify(persistCursor)},
+          (!isRoot && scroller instanceof Element && rectClean) ? scroller : null
         ) || "";
       } catch {}
       if (${JSON.stringify(cursorMode === "demo")}) {
@@ -2859,15 +2880,17 @@ async function capturePageScreenshot(page, outPathArg, flags = {}, timeoutMs = 3
     }
   }
 
-  const keepCursor = Boolean(
+  const activelyRecording =
+    !flags["no-cursor"] && isTargetActivelyRecording(page?.targetId);
+  const explicitWithCursor = Boolean(
     flags["with-cursor"] ||
       flags["keep-cursor"] ||
       flags["show-cursor"] ||
       flags.withCursor ||
       flags.keepCursor ||
-      process.env.CDP_SCREENSHOT_CURSOR === "1" ||
-      (!flags["no-cursor"] && isTargetActivelyRecording(page?.targetId)),
+      process.env.CDP_SCREENSHOT_CURSOR === "1",
   );
+  const keepCursor = explicitWithCursor || activelyRecording;
   const preState = await evaluateInPage(
     page,
     `(() => {
@@ -2875,11 +2898,14 @@ async function capturePageScreenshot(page, outPathArg, flags = {}, timeoutMs = 3
       let cursorPrep = { mode: "none" };
       if (${JSON.stringify(keepCursor)}) {
         try {
-          cursorPrep = (${CURSOR_HELPER_SOURCE}).prepareScreenshot(true);
+          cursorPrep = (${CURSOR_HELPER_SOURCE}).prepareScreenshot(
+            ${JSON.stringify(explicitWithCursor)},
+            { activelyRecording: ${JSON.stringify(activelyRecording)} }
+          );
         } catch {}
       } else {
         const c = window[Symbol.for("cdp.bridge.cursor")];
-        if (c) c.prepareScreenshot(false);
+        if (c) c.prepareScreenshot(false, { activelyRecording: false });
       }
       return { hidden, cursorPrep };
     })()`,
@@ -2896,7 +2922,7 @@ async function capturePageScreenshot(page, outPathArg, flags = {}, timeoutMs = 3
   } finally {
     await evaluateInPage(
       page,
-      `(() => { const c = window[Symbol.for("cdp.bridge.cursor")]; if (c) c.finishScreenshot(${JSON.stringify(keepCursor)}); return true; })()`,
+      `(() => { const c = window[Symbol.for("cdp.bridge.cursor")]; if (c) c.finishScreenshot(${JSON.stringify(explicitWithCursor)}, { activelyRecording: ${JSON.stringify(activelyRecording)} }); return true; })()`,
       { timeoutMs: 3_000 },
     ).catch(() => {});
   }
