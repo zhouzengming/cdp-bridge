@@ -1,6 +1,6 @@
 {
   "name": "cdp-bridge",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Lightweight CLI edition of cdp-bridge for Claude Code: bundles the cdp-bridge browser debugging skill and a PreToolUse Bash guard hook that prevents bypassing the persistent CDP bridge daemon.",
   "author": {
     "name": "zhouzengming",

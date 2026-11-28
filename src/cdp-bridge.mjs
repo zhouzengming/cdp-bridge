@@ -188,6 +188,74 @@ const pidPath = isNamedPipe
 const logPath = isNamedPipe
   ? connArgs.logFile || path.join(stateDir, "bridge.log")
   : connArgs.logFile || `${socketPath}.log`;
+const preferredTargetPath = path.join(stateDir, "preferred-target.json");
+const startLockPath = path.join(stateDir, "start.lock");
+const clientSessionsPath = path.join(stateDir, "client-sessions.json");
+
+function clearClientSessionsCache() {
+  try {
+    fs.unlinkSync(clientSessionsPath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      // Ignore transient cache cleanup errors
+    }
+  }
+}
+
+function loadPreferredTarget() {
+  try {
+    if (!fs.existsSync(preferredTargetPath)) return null;
+    const data = JSON.parse(fs.readFileSync(preferredTargetPath, "utf8"));
+    if (
+      data &&
+      typeof data === "object" &&
+      (data.wsUrl || data.port || data.portFile)
+    ) {
+      return data;
+    }
+  } catch {
+    // Ignore corrupted preferred-target file
+  }
+  return null;
+}
+
+function savePreferredTarget({
+  wsUrl = "",
+  host = "",
+  port = "",
+  portFile = "",
+} = {}) {
+  try {
+    let resolvedHost = host;
+    let resolvedPort = port ? String(port) : "";
+    if (wsUrl) {
+      try {
+        const parsed = new URL(wsUrl);
+        resolvedHost = resolvedHost || parsed.hostname || "127.0.0.1";
+        resolvedPort = resolvedPort || parsed.port || "";
+      } catch {
+        // Keep explicit host/port if URL parse fails
+      }
+    }
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      preferredTargetPath,
+      JSON.stringify(
+        {
+          wsUrl,
+          host: resolvedHost || "127.0.0.1",
+          port: resolvedPort,
+          portFile: portFile ? path.resolve(portFile) : "",
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+  } catch {
+    // Ignore transient state write errors
+  }
+}
 
 function findDevToolsActivePortCandidates() {
   const candidates = [];
@@ -207,7 +275,22 @@ function findDevToolsActivePortCandidates() {
     "Chromium/User Data/DevToolsActivePort",
   ];
 
-  if (isWindows) {
+  if (process.env.CDP_DEVTOOLS_SEARCH_ROOT) {
+    const customRoot = path.resolve(process.env.CDP_DEVTOOLS_SEARCH_ROOT);
+    for (const rel of winBrowserRelPaths) {
+      candidates.push(path.join(customRoot, rel));
+    }
+    candidates.push(
+      path.join(customRoot, ".config/google-chrome/DevToolsActivePort"),
+      path.join(customRoot, ".config/microsoft-edge/DevToolsActivePort"),
+      path.join(customRoot, ".config/chromium/DevToolsActivePort"),
+      path.join(
+        customRoot,
+        ".config/BraveSoftware/Brave-Browser/DevToolsActivePort",
+      ),
+      path.join(customRoot, "DevToolsActivePort"),
+    );
+  } else if (isWindows) {
     const localAppDataDirs = Array.from(
       new Set(
         [
@@ -388,6 +471,42 @@ function fetchDebuggerWebsocketUrl(host, port, timeoutMs = 2_500) {
   });
 }
 
+async function resolveLiveEndpointFromWsUrl(
+  wsUrl,
+  fallbackHost = "127.0.0.1",
+  candidates = null,
+) {
+  if (!wsUrl) return "";
+  let parsed;
+  try {
+    parsed = new URL(wsUrl);
+  } catch {
+    return "";
+  }
+  const host = parsed.hostname || fallbackHost;
+  const port = parsed.port;
+  if (!port || !(await probeTcpPort(host, port, 800))) {
+    return "";
+  }
+  try {
+    return await fetchDebuggerWebsocketUrl(host, port, 800);
+  } catch {
+    // chrome://inspect ports do not expose HTTP /json/version; check DevToolsActivePort or reuse wsUrl
+  }
+  const activeFiles = candidates || findDevToolsActivePortCandidates();
+  for (const candidate of activeFiles) {
+    try {
+      const rec = parseActivePortRecord(candidate);
+      if (String(rec.port) === String(port)) {
+        return `ws://${formatHostForUrl(host)}:${rec.port}${rec.websocketPath}`;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return wsUrl;
+}
+
 async function readBrowserWebsocketUrl(options = connArgs) {
   if (options.wsUrl || process.env.CDP_WS_URL) {
     return options.wsUrl || process.env.CDP_WS_URL;
@@ -439,6 +558,49 @@ async function readBrowserWebsocketUrl(options = connArgs) {
   }
 
   const candidates = findDevToolsActivePortCandidates();
+
+  // Honor sticky user-selected browser target (from prior `cdp connect`) while its port remains open,
+  // preventing unintended browser flip-flopping when Chrome and Edge both have DevToolsActivePort files.
+  const preferred = options.ignorePreferred ? null : loadPreferredTarget();
+  if (preferred) {
+    const prefHost = options.host || preferred.host || targetHost;
+    if (preferred.portFile) {
+      try {
+        const rec = parseActivePortRecord(preferred.portFile);
+        if (await probeTcpPort(prefHost, rec.port, 800)) {
+          return `ws://${formatHostForUrl(prefHost)}:${rec.port}${rec.websocketPath}`;
+        }
+      } catch {
+        // Fall through to wsUrl/port check
+      }
+    }
+    if (preferred.wsUrl) {
+      const livePref = await resolveLiveEndpointFromWsUrl(
+        preferred.wsUrl,
+        prefHost,
+        candidates,
+      );
+      if (livePref) {
+        return livePref;
+      }
+    } else if (preferred.port && (await probeTcpPort(prefHost, preferred.port, 800))) {
+      try {
+        return await fetchDebuggerWebsocketUrl(prefHost, preferred.port, 800);
+      } catch {
+        for (const candidate of candidates) {
+          try {
+            const rec = parseActivePortRecord(candidate);
+            if (String(rec.port) === String(preferred.port)) {
+              return `ws://${formatHostForUrl(prefHost)}:${rec.port}${rec.websocketPath}`;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+    }
+  }
+
   if (candidates.length === 0) {
     const defaultPath = isWindows
       ? path.join(
@@ -553,123 +715,180 @@ async function stopRunningBridge() {
   removeStaleRuntimeFiles();
 }
 
+async function acquireStartLock(maxWaitMs = 8_000) {
+  fs.mkdirSync(stateDir, { recursive: true });
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(startLockPath, "wx");
+      fs.writeSync(
+        fd,
+        JSON.stringify({ pid: process.pid, createdAtMs: Date.now() }),
+      );
+      fs.closeSync(fd);
+      return true;
+    } catch (err) {
+      if (err.code !== "EEXIST") {
+        return false;
+      }
+      try {
+        const raw = fs.readFileSync(startLockPath, "utf8").trim();
+        const info = raw ? JSON.parse(raw) : {};
+        const ageMs = Date.now() - (Number(info.createdAtMs) || 0);
+        const ownerAlive =
+          Number.isInteger(info.pid) && isProcessRunning(info.pid);
+        if (!ownerAlive || ageMs > 10_000) {
+          fs.unlinkSync(startLockPath);
+          continue;
+        }
+      } catch {
+        // Lock file may have just been removed; retry
+      }
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+  }
+  return false;
+}
+
+function releaseStartLock() {
+  try {
+    const raw = fs.readFileSync(startLockPath, "utf8").trim();
+    const info = raw ? JSON.parse(raw) : {};
+    if (!info.pid || info.pid === process.pid) {
+      fs.unlinkSync(startLockPath);
+    }
+  } catch {
+    // Ignore if already removed
+  }
+}
+
 async function startBridge({ forceRestart = false } = {}) {
   let resolvedWsUrl = "";
   if (connArgs.explicit) {
     resolvedWsUrl = await readBrowserWebsocketUrl(connArgs);
+    savePreferredTarget({
+      wsUrl: resolvedWsUrl,
+      host: connArgs.host,
+      port: connArgs.port,
+      portFile: connArgs.portFile,
+    });
   }
 
-  let previousWsUrl = "";
+  let lastStatus = null;
+  let reusedRunningDaemon = false;
+
+  await acquireStartLock();
   try {
-    const status = await requestBridge(
-      { id: 1, method: "bridge.status" },
-      2_000,
-    );
-    previousWsUrl = status.browserWebsocketUrl || "";
-    const sameTarget =
-      !resolvedWsUrl ||
-      (status.browserWebsocketUrl &&
-        status.browserWebsocketUrl === resolvedWsUrl);
-    if (!forceRestart && sameTarget && status.browserState === "ready") {
-      console.log(JSON.stringify(status, null, 2));
-      return;
-    }
-    if (
-      !forceRestart &&
-      sameTarget &&
-      status.browserState === "connecting" &&
-      connArgs.noWait
-    ) {
-      console.log(JSON.stringify(status, null, 2));
-      return;
-    }
-    await stopRunningBridge();
-  } catch {
-    removeStaleRuntimeFiles();
-  }
-
-  // On bare restart without explicit args, try auto-discovery first; if none found, reuse previous live endpoint
-  if (!resolvedWsUrl && !connArgs.explicit) {
+    let previousWsUrl = "";
     try {
-      resolvedWsUrl = await readBrowserWebsocketUrl(connArgs);
-    } catch (err) {
-      if (previousWsUrl) {
-        try {
-          const parsedPrev = new URL(previousWsUrl);
-          if (
-            await probeTcpPort(
-              parsedPrev.hostname,
-              parsedPrev.port || "80",
-              800,
-            )
-          ) {
-            resolvedWsUrl = previousWsUrl;
-          } else {
-            throw err;
-          }
-        } catch {
-          throw err;
-        }
+      const status = await requestBridge(
+        { id: 1, method: "bridge.status" },
+        2_000,
+      );
+      previousWsUrl = status.browserWebsocketUrl || "";
+      const sameTarget =
+        !resolvedWsUrl ||
+        (status.browserWebsocketUrl &&
+          status.browserWebsocketUrl === resolvedWsUrl);
+      if (!forceRestart && sameTarget && status.browserState === "ready") {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+      if (!forceRestart && sameTarget && status.browserState === "connecting") {
+        lastStatus = status;
+        reusedRunningDaemon = true;
       } else {
-        throw err;
+        await stopRunningBridge();
+        clearClientSessionsCache();
+      }
+    } catch {
+      removeStaleRuntimeFiles();
+    }
+
+    if (!reusedRunningDaemon) {
+      // On bare restart/start without explicit args, prefer the previous live endpoint (if still open)
+      // or sticky preferred-target.json before blind mtime scan across browsers.
+      if (!resolvedWsUrl && !connArgs.explicit) {
+        if (previousWsUrl) {
+          resolvedWsUrl = await resolveLiveEndpointFromWsUrl(
+            previousWsUrl,
+            connArgs.host || "127.0.0.1",
+          );
+        }
+        if (!resolvedWsUrl) {
+          resolvedWsUrl = await readBrowserWebsocketUrl(connArgs);
+        }
+      }
+
+      clearClientSessionsCache();
+
+      const childEnv = { ...process.env };
+      if (resolvedWsUrl) {
+        childEnv.CDP_WS_URL = resolvedWsUrl;
+      }
+      if (connArgs.host) {
+        childEnv.CDP_HOST = connArgs.host;
+      }
+      if (connArgs.port) {
+        childEnv.CDP_PORT = connArgs.port;
+      }
+      if (connArgs.portFile) {
+        childEnv.CDP_PORT_FILE = connArgs.portFile;
+      }
+
+      fs.mkdirSync(stateDir, { recursive: true });
+
+      const serveArgs = [scriptPath, "serve"];
+      if (isWindows) {
+        serveArgs.push("--log-file", logPath, "--socket", socketPath);
+        if (resolvedWsUrl) serveArgs.push("--ws-url", resolvedWsUrl);
+        if (connArgs.host) serveArgs.push("--host", connArgs.host);
+        if (connArgs.port) serveArgs.push("--port", String(connArgs.port));
+        if (connArgs.portFile) serveArgs.push("--port-file", connArgs.portFile);
+      }
+
+      const wmiSpawned = isWindows
+        ? trySpawnWindowsWmiBreakaway(
+            process.execPath,
+            serveArgs,
+            stateDir,
+            childEnv,
+          )
+        : { ok: false };
+
+      if (!wmiSpawned.ok) {
+        const logFd = fs.openSync(logPath, "a");
+        const child = spawn(process.execPath, [scriptPath, "serve"], {
+          detached: true,
+          env: childEnv,
+          stdio: ["ignore", logFd, logFd],
+          windowsHide: true,
+        });
+        child.unref();
+        fs.closeSync(logFd);
+      }
+
+      const socketDeadline = Date.now() + 5_000;
+      while (Date.now() < socketDeadline) {
+        try {
+          lastStatus = await requestBridge(
+            { id: 1, method: "bridge.status" },
+            1_000,
+          );
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+      }
+
+      if (!lastStatus) {
+        throw new Error(
+          `CDP bridge did not create ${socketPath}; see ${logPath}`,
+        );
       }
     }
-  }
-
-  const childEnv = { ...process.env };
-  if (resolvedWsUrl) {
-    childEnv.CDP_WS_URL = resolvedWsUrl;
-  }
-  if (connArgs.host) {
-    childEnv.CDP_HOST = connArgs.host;
-  }
-  if (connArgs.port) {
-    childEnv.CDP_PORT = connArgs.port;
-  }
-  if (connArgs.portFile) {
-    childEnv.CDP_PORT_FILE = connArgs.portFile;
-  }
-
-  fs.mkdirSync(stateDir, { recursive: true });
-
-  const serveArgs = [scriptPath, "serve"];
-  if (isWindows) {
-    serveArgs.push("--log-file", logPath, "--socket", socketPath);
-    if (resolvedWsUrl) serveArgs.push("--ws-url", resolvedWsUrl);
-    if (connArgs.host) serveArgs.push("--host", connArgs.host);
-    if (connArgs.port) serveArgs.push("--port", String(connArgs.port));
-    if (connArgs.portFile) serveArgs.push("--port-file", connArgs.portFile);
-  }
-
-  const wmiSpawned = isWindows
-    ? trySpawnWindowsWmiBreakaway(process.execPath, serveArgs, stateDir, childEnv)
-    : { ok: false };
-
-  if (!wmiSpawned.ok) {
-    const logFd = fs.openSync(logPath, "a");
-    const child = spawn(process.execPath, [scriptPath, "serve"], {
-      detached: true,
-      env: childEnv,
-      stdio: ["ignore", logFd, logFd],
-      windowsHide: true,
-    });
-    child.unref();
-    fs.closeSync(logFd);
-  }
-
-  const socketDeadline = Date.now() + 5_000;
-  let lastStatus = null;
-  while (Date.now() < socketDeadline) {
-    try {
-      lastStatus = await requestBridge({ id: 1, method: "bridge.status" }, 1_000);
-      break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 80));
-    }
-  }
-
-  if (!lastStatus) {
-    throw new Error(`CDP bridge did not create ${socketPath}; see ${logPath}`);
+  } finally {
+    releaseStartLock();
   }
 
   if (connArgs.noWait || lastStatus.browserState === "ready") {
@@ -771,7 +990,7 @@ async function serveBridge() {
   }
 
   let browserSocket;
-  let browserWebsocketUrl = "";
+  let browserWebsocketUrl = connArgs.wsUrl || process.env.CDP_WS_URL || "";
   let browserState = "connecting";
   let browserError = "";
   let connectedAt = "";
@@ -2133,9 +2352,9 @@ Connection Options (for start / restart / connect):
 try {
   if (command === "serve") {
     await serveBridge();
-  } else if (command === "start") {
+  } else if (command === "start" || command === "connect") {
     await startBridge({ forceRestart: false });
-  } else if (command === "restart" || command === "connect") {
+  } else if (command === "restart") {
     await startBridge({ forceRestart: true });
   } else if (command === "status") {
     console.log(

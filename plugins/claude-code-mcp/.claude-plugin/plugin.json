@@ -1,6 +1,6 @@
 {
   "name": "cdp-bridge-mcp",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "MCP + CLI edition of cdp-bridge for Claude Code: exposes 18 structured UTF-8 MCP browser tools (including mouse drag and pause/resume/concat WebM screen recording) over the shared cdp-bridge daemon (ideal for native Windows PowerShell/CMD and sandboxed sessions), plus workflow skill and PreToolUse Bash guard.",
   "author": {
     "name": "zhouzengming",

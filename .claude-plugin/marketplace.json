@@ -10,14 +10,14 @@
       "name": "cdp-bridge",
       "description": "Lightweight CLI edition: bundles the cdp-bridge browser debugging & recording skill and a PreToolUse Bash guard blocking raw :9222 bypasses (ideal for Linux / WSL2 / macOS).",
       "source": "./plugins/claude-code",
-      "version": "1.7.0",
+      "version": "1.7.1",
       "category": "productivity"
     },
     {
       "name": "cdp-bridge-mcp",
       "description": "MCP + CLI edition: exposes 18 structured UTF-8 MCP browser tools (including mouse drag and pause/resume/concat WebM recording) over the shared cdp-bridge daemon alongside the workflow skill and Bash guard (ideal for native Windows).",
       "source": "./plugins/claude-code-mcp",
-      "version": "1.7.0",
+      "version": "1.7.1",
       "category": "productivity"
     }
   ]

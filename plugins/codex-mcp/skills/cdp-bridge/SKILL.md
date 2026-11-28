@@ -21,6 +21,7 @@ description: "通过本地常驻 CDP 桥接守护进程（cdp-bridge）与命令
    - 读取纯文本或表达式返回值加 `--raw`（如 `cdp text 426B5451 main --raw`、`cdp eval 426B5451 "location.href" --raw`）。
    - 排查接口时为 `cdp network` 加上过滤条件（如 `cdp network 426B5451 --all --type fetch,xhr --url "/api/"`），避免无过滤倾倒全量静态资源。
 5. **多步连续交互优先用 `cdp batch`，长等待验收录屏配合 `pause/resume` 或 `concat`**：遇到生文/生图/构建等长等待步骤时，用 `cdp record pause` → `cdp wait` → `cdp record resume`（或分段录制后 `cdp record concat`）避免保存冗长等待画面。
+6. **等待浏览器授权时严禁杀进程或重复重连，多浏览器切换自动记忆**：当返回 `PENDING_BROWSER_APPROVAL`（退出码 `2`）或 `browserState: "connecting"` 时，桥接守护进程已在后台维持握手等待用户点击「允许 / Allow」，**严禁**终止桥接进程或重复执行 `cdp connect` / `cdp restart`（否则会弹出重复授权框）；提示用户点击「允许」后调用只读 `cdp status` 确认即可。多浏览器并存时，显式执行一次 `cdp connect 127.0.0.1:<port>` 后会自动持久化记忆目标浏览器，后续自启动不会误切到其他浏览器。
 
 ## 标准工作流速查
 

@@ -1020,7 +1020,27 @@ export async function dispatchMcpToolCall(name, args = {}, context = {}) {
   });
 
   if (!res.ok) {
-    const errText = [res.stderr, res.stdout].filter(Boolean).join("\n") || `cdp exited with code ${res.exitCode}`;
+    const errText =
+      [res.stderr, res.stdout].filter(Boolean).join("\n") ||
+      `cdp exited with code ${res.exitCode}`;
+    if (
+      res.exitCode === 2 ||
+      errText.includes("PENDING_BROWSER_APPROVAL") ||
+      errText.includes("pendingApprovalHint")
+    ) {
+      const approvalNotice = [
+        "[PENDING_BROWSER_APPROVAL] cdp-bridge 守护进程已在后台运行并维持当前握手，正在等待用户在浏览器弹窗中点击「允许 / Allow」。",
+        "重要约束：",
+        "1. 严禁终止（kill / Stop-Process / taskkill）桥接守护进程 PID，也严禁重复调用 cdp_status(connect) 或 cdp restart，否则会中断当前握手并弹出新的重复授权弹窗。",
+        "2. 请直接提示用户在浏览器远程调试确认框中点击「允许 / Allow」，待用户确认后调用只读的 cdp_status({ ensure: false }) 或重试原操作即可。",
+        "",
+        errText,
+      ].join("\n");
+      return {
+        isError: true,
+        content: [{ type: "text", text: approvalNotice }],
+      };
+    }
     return {
       isError: true,
       content: [{ type: "text", text: errText }],

@@ -206,8 +206,7 @@ function sendBridgeRequestOnce(payload, timeoutMs = 15_000) {
 }
 
 function ensureBridgeAutoStarted(timeoutMs = 15_000) {
-  saveClientSessions({});
-  const bridgeArgs = [bridgeScriptPath, "restart"];
+  const bridgeArgs = [bridgeScriptPath, "start"];
   if (socketOverride) {
     bridgeArgs.push("--socket", socketOverride);
   }
@@ -221,9 +220,22 @@ function ensureBridgeAutoStarted(timeoutMs = 15_000) {
   });
 
   if (res.status === 2) {
-    throw new Error(
-      "CDP bridge daemon was auto-started and is waiting for browser remote debugging approval. Click 'Allow' in the browser prompt, then re-run the command.",
+    let detail = "";
+    try {
+      const info = JSON.parse((res.stdout || "").trim());
+      if (info?.pid || info?.browserWebsocketUrl) {
+        detail = ` (daemon PID ${info.pid || "running"}, target ${info.browserWebsocketUrl || "pending"})`;
+      }
+    } catch {
+      // Ignore stdout JSON parse error
+    }
+    const err = new Error(
+      `PENDING_BROWSER_APPROVAL: CDP bridge daemon is running${detail} and waiting for browser remote debugging approval. ` +
+        `Ask the user to click 'Allow' in the browser prompt, then check status or re-run the command. ` +
+        `DO NOT kill/stop the daemon process or call connect/restart again, or a duplicate approval popup will be triggered.`,
     );
+    err.exitCode = 2;
+    throw err;
   }
   if (res.status !== 0) {
     const detail = (res.stderr || res.stdout || "").trim();
@@ -2837,6 +2849,22 @@ async function capturePageScreenshot(page, outPathArg, flags = {}, timeoutMs = 3
     params.quality = Number(flags.quality);
   }
 
+  // Wake hidden background tabs BEFORE layout/scrollIntoView/captureScreenshot so Chromium compositor never stalls
+  const visibilityProbe = await evaluateInPage(
+    page,
+    `document.visibilityState === "hidden"`,
+    { timeoutMs: 2_500 },
+  ).catch(() => null);
+  if (visibilityProbe?.evaluation?.value === true) {
+    await callPage(
+      page,
+      "Page.setWebLifecycleState",
+      { state: "active" },
+      3_000,
+    ).catch(() => {});
+    await callPage(page, "Page.bringToFront", {}, 5_000).catch(() => {});
+  }
+
   if (flags.selector && typeof flags.selector === "string") {
     const rectRes = await evaluateInPage(
       page,
@@ -3851,7 +3879,7 @@ async function main() {
     command === "restart" ||
     command === "stop"
   ) {
-    if (command === "connect" || command === "restart" || command === "stop") {
+    if (command === "restart" || command === "stop") {
       saveClientSessions({});
     }
     const forwardArgs = [...restArgs];
@@ -4775,14 +4803,15 @@ try {
     console.error(JSON.stringify(error.partialResults, null, 2));
   }
   console.error(error.stack || error.message);
-  process.exitCode = 1;
+  const exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
+  process.exitCode = exitCode;
   recordCliInvocation({
     startTimeMs: cliStartTimeMs,
     rawArgs,
     rawCommand: resolvedCommandName || rawArgs[0] || "(none)",
     data: error.partialResults || null,
     outputBytes: 0,
-    exitCode: 1,
+    exitCode,
     error,
     telemetry: diagTelemetry,
     logPathOverride: diagLogOverride || undefined,
